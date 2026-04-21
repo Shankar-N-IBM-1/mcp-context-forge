@@ -1,0 +1,5 @@
+name: "GooglePingPlugin"
+version: "0.1.0"
+author: "ContextForge"
+description: "Background plugin that pings a configured URL on an interval"
+kind: "plugins.google_ping.google_ping.GooglePingPlugin"

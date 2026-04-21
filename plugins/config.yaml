@@ -320,24 +320,24 @@ plugins:
       allowed_extensions: [".md", ".txt", ".html", ".json"]
 
   # Retry with exponential backoff — triggers real gateway re-invocation
-  - name: "RetryWithBackoffPlugin"
-    kind: "cpex_retry_with_backoff.RetryWithBackoffPlugin"
-    description: "Detects transient failures and asks the gateway to re-invoke the tool after a jittered exponential backoff delay"
-    version: "0.1.0"
-    author: "Mihai Criveti"
-    hooks: ["tool_post_invoke"]
-    tags: ["retry", "backoff", "resilience"]
-    mode: "permissive"
-    priority: 170
-    conditions: []
-    config:
-      max_retries: 2
-      backoff_base_ms: 200
-      max_backoff_ms: 5000
-      retry_on_status: [429, 500, 502, 503, 504]
-      jitter: true
-      check_text_content: false
-      tool_overrides: {}
+#  - name: "RetryWithBackoffPlugin"
+#    kind: "cpex_retry_with_backoff.RetryWithBackoffPlugin"
+#    description: "Detects transient failures and asks the gateway to re-invoke the tool after a jittered exponential backoff delay"
+#    version: "0.1.0"
+#    author: "Mihai Criveti"
+#    hooks: ["tool_post_invoke"]
+#    tags: ["retry", "backoff", "resilience"]
+#    mode: "permissive"
+#    priority: 170
+#    conditions: []
+#    config:
+#      max_retries: 2
+#      backoff_base_ms: 200
+#      max_backoff_ms: 5000
+#      retry_on_status: [429, 500, 502, 503, 504]
+#      jitter: true
+#      check_text_content: false
+#      tool_overrides: {}
 
   # Markdown cleaner
   - name: "MarkdownCleanerPlugin"
@@ -1085,3 +1085,18 @@ plugins:
     conditions: []
     config:
       context_key: jwt_claims
+
+    # Google Ping Plugin — background HTTP ping task example
+  - name: "GooglePingPlugin"
+    kind: "plugins.google_ping.google_ping.GooglePingPlugin"
+    description: "Background plugin that pings a configured URL on an interval"
+    version: "0.1.0"
+    author: "ContextForge"
+    hooks: []
+    tags: ["background", "http", "monitoring", "healthcheck"]
+    mode: "permissive"
+    priority: 500
+    conditions: []
+    config:
+        interval: 5
+        url: "https://google.com"
