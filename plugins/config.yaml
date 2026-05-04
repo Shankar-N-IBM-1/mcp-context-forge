@@ -16,6 +16,50 @@ plugin_settings:
   include_user_info: false
 
 plugins:
+  # Server Monitor - periodically logs all virtual servers and syncs to FAM
+  - name: "ServerMonitor"
+    kind: "plugins.server_monitor.server_monitor.ServerMonitorPlugin"
+    description: "Periodically logs all virtual servers and syncs them to FAM"
+    version: "1.0.0"
+    author: "ContextForge"
+    hooks: []  # No hooks, uses background task
+    tags: ["monitoring", "servers", "logging", "fam", "sync"]
+    mode: "permissive"
+    priority: 1000
+    conditions: []
+    config:
+      interval_seconds: 60  # Sync/log every 60 seconds
+      log_details: true     # Include detailed server information
+      
+      # FAM sync configuration (disabled by default)
+      fam_enabled: false
+      fam_base_url: "https://fam.example.com"
+      fam_runtime_id: ""  # Optional if fam_auto_register is true
+      fam_auth_token: "your-bearer-token"
+      fam_timeout: 30
+      
+      # Runtime auto-registration (creates runtime in FAM on plugin startup)
+      fam_auto_register: true  # Auto-register runtime if fam_runtime_id is not provided
+      fam_runtime_name: "ContextForge Gateway"
+      fam_runtime_description: "ContextForge MCP Gateway Runtime"
+      fam_runtime_type: "WEBMETHODS_GATEWAY"  # WEBMETHODS_GATEWAY, APIGEE, KONG, AWS_API_GATEWAY, AZURE_API_MANAGEMENT
+      fam_runtime_deployment_type: "ON_PREMISE"  # ON_PREMISE, CLOUD, HYBRID
+      fam_runtime_region: "us-east-1"  # Optional: Region identifier
+      fam_runtime_location: "US East"  # Optional: Location description
+      fam_runtime_host: "contextforge-gateway"  # Optional: Host identifier
+      fam_runtime_tags: ["contextforge", "mcp", "gateway"]  # Optional: Runtime tags
+      fam_runtime_capacity_value: "100"  # Capacity value
+      fam_runtime_capacity_unit: "per minute"  # Capacity unit
+      fam_runtime_heartbeat_interval: 6000  # Heartbeat interval in milliseconds (for registration)
+      
+      # Runtime heartbeat (sends periodic heartbeats to FAM)
+      fam_heartbeat_enabled: true  # Enable runtime heartbeat
+      fam_heartbeat_interval_seconds: 60  # Send heartbeat every 60 seconds
+      
+      # Metrics sync configuration (disabled by default)
+      metrics_sync_enabled: false  # Enable metrics synchronization to FAM
+      metrics_sync_interval: 300   # Sync metrics every 5 minutes (300 seconds)
+
   # Argument Normalizer - stabilize inputs before anything else
   - name: "ArgumentNormalizer"
     kind: "plugins.argument_normalizer.argument_normalizer.ArgumentNormalizerPlugin"
