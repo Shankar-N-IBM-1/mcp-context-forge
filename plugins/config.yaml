@@ -16,14 +16,14 @@ plugin_settings:
   include_user_info: false
 
 plugins:
-  # Server Monitor - periodically logs all virtual servers and syncs to FAM
-  - name: "ServerMonitor"
-    kind: "plugins.server_monitor.server_monitor.ServerMonitorPlugin"
-    description: "Periodically logs all virtual servers and syncs them to FAM"
+  # API Connect FAM - integrates with webMethods API Control Plane FAM
+  - name: "APIConnectFAM"
+    kind: "plugins.apiconnect_fam.apiconnect_fam.APIConnectFAMPlugin"
+    description: "Integrates with webMethods API Control Plane FAM - syncs servers, tools, and metrics"
     version: "1.0.0"
     author: "ContextForge"
     hooks: []  # No hooks, uses background task
-    tags: ["monitoring", "servers", "logging", "fam", "sync"]
+    tags: ["fam", "api-connect", "webmethods", "sync", "monitoring"]
     mode: "permissive"
     priority: 1000
     conditions: []
@@ -32,14 +32,15 @@ plugins:
       log_details: true     # Include detailed server information
       
       # FAM sync configuration (disabled by default)
-      fam_enabled: false
-      fam_base_url: "https://fam.example.com"
-      fam_runtime_id: ""  # Optional if fam_auto_register is true
-      fam_auth_token: "your-bearer-token"
+      fam_enabled: true
+      fam_base_url: "https://localhost:444"
+      fam_runtime_id: "0f8320a0-6a63-45b5-8217-a7488f150988"  # REQUIRED: Runtime ID from FAM registration
+      fam_username: "Administrator"  # FAM username for Basic Authentication
+      fam_password: "Welcome@123"    # FAM password for Basic Authentication
       fam_timeout: 30
+      fam_verify_ssl: false  # Set to false for self-signed certificates
       
-      # Runtime auto-registration (creates runtime in FAM on plugin startup)
-      fam_auto_register: true  # Auto-register runtime if fam_runtime_id is not provided
+      # Runtime metadata (for reference only, not used after initial registration)
       fam_runtime_name: "ContextForge Gateway"
       fam_runtime_description: "ContextForge MCP Gateway Runtime"
       fam_runtime_type: "WEBMETHODS_GATEWAY"  # WEBMETHODS_GATEWAY, APIGEE, KONG, AWS_API_GATEWAY, AZURE_API_MANAGEMENT
@@ -50,11 +51,11 @@ plugins:
       fam_runtime_tags: ["contextforge", "mcp", "gateway"]  # Optional: Runtime tags
       fam_runtime_capacity_value: "100"  # Capacity value
       fam_runtime_capacity_unit: "per minute"  # Capacity unit
-      fam_runtime_heartbeat_interval: 6000  # Heartbeat interval in milliseconds (for registration)
+      fam_runtime_heartbeat_interval_seconds: 60  # Heartbeat interval in seconds (converted to ms for FAM, also used for activity interval)
       
-      # Runtime heartbeat (sends periodic heartbeats to FAM)
-      fam_heartbeat_enabled: true  # Enable runtime heartbeat
-      fam_heartbeat_interval_seconds: 60  # Send heartbeat every 60 seconds
+      # Asset sync configuration (servers and tools)
+      fam_asset_sync_enabled: false # Enable asset (servers/tools) synchronization to FAM
+      fam_asset_sync_interval: 60   # Sync assets every 60 seconds
       
       # Metrics sync configuration (disabled by default)
       metrics_sync_enabled: false  # Enable metrics synchronization to FAM

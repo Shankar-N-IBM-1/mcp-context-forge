@@ -40,6 +40,7 @@ class ReregistrationReport(BaseModel):
     
     Attributes:
         runtime_id: The registered runtime ID
+        status_code: HTTP status code from registration (201=created, 200/409=re-registered)
         last_registration_time: Timestamp of last registration (milliseconds)
         last_heartbeat_time: Timestamp of last heartbeat (milliseconds)
         last_metrics_time: Timestamp of last metrics sync (milliseconds)
@@ -47,6 +48,9 @@ class ReregistrationReport(BaseModel):
     """
     
     runtime_id: str
+    status_code: int = Field(
+        description="HTTP status code (201=created, 200/409=re-registered)"
+    )
     last_registration_time: Optional[int] = Field(
         default=None,
         description="Last registration timestamp in milliseconds"
@@ -63,6 +67,14 @@ class ReregistrationReport(BaseModel):
         default=None,
         description="Last asset sync timestamp in milliseconds"
     )
+    
+    def is_reregistration(self) -> bool:
+        """Check if this is a re-registration (status 200 or 409).
+        
+        Returns:
+            True if status code is 200 or 409 (re-registration), False otherwise (201=first-time)
+        """
+        return self.status_code in (200, 409)
 
 
 class ActivityContext(BaseModel):
@@ -74,13 +86,11 @@ class ActivityContext(BaseModel):
     Attributes:
         runtime_id: Runtime ID for this agent
         fam_base_url: Base URL for FAM API
-        fam_auth_token: Authentication token for FAM
         config: Plugin configuration dictionary
     """
     
     runtime_id: str
     fam_base_url: str
-    fam_auth_token: str
     config: Dict[str, Any] = Field(default_factory=dict)
     
     class Config:

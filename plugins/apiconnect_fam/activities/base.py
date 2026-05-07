@@ -6,88 +6,83 @@ Copyright 2025
 SPDX-License-Identifier: Apache-2.0
 """
 
+# Standard
+from abc import ABC, abstractmethod
 import logging
 import time
-from abc import ABC, abstractmethod
 from typing import Optional
 
+# Local
 from ..models import ActivityContext, ActivityStatistics
 
 
 class AbstractActivity(ABC):
     """Base class for all activities.
-    
+
     Following webMethods SDK pattern, activities represent discrete operations
     that can be executed independently. Each activity has access to shared
     context and tracks its own execution statistics.
-    
+
     Attributes:
         context: Shared activity context
         logger: Logger for this activity
         stats: Execution statistics
     """
-    
+
     def __init__(self, context: ActivityContext):
         """Initialize activity.
-        
+
         Args:
             context: Shared activity context
         """
         self.context = context
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.stats = ActivityStatistics(activity_name=self.__class__.__name__)
-    
+
     @abstractmethod
     async def perform(self) -> None:
         """Execute the activity.
-        
+
         This method must be implemented by subclasses to define
         the activity's behavior.
-        
+
         Raises:
             Exception: If activity execution fails
         """
         pass
-    
+
     async def execute(self) -> bool:
         """Execute activity with statistics tracking.
-        
+
         Wraps the perform() method with timing and error handling.
-        
+
         Returns:
             True if execution succeeded, False otherwise
         """
         start_time = time.time()
         success = False
         error_msg: Optional[str] = None
-        
+
         try:
             self.logger.debug(f"Executing {self.__class__.__name__}")
             await self.perform()
             success = True
             self.logger.debug(f"{self.__class__.__name__} completed successfully")
-            
+
         except Exception as e:
             error_msg = str(e)
-            self.logger.error(
-                f"{self.__class__.__name__} failed: {e}",
-                exc_info=True
-            )
-            
+            self.logger.error(f"{self.__class__.__name__} failed: {e}", exc_info=True)
+
         finally:
             # Record execution statistics
             duration_ms = (time.time() - start_time) * 1000
-            self.stats.record_execution(
-                success=success,
-                duration_ms=duration_ms,
-                error=error_msg
-            )
-        
+            self.stats.record_execution(success=success, duration_ms=duration_ms, error=error_msg)
+
         return success
-    
+
     def get_statistics(self) -> ActivityStatistics:
         """Get execution statistics for this activity.
-        
+
         Returns:
             Activity statistics
         """
@@ -96,63 +91,63 @@ class AbstractActivity(ABC):
 
 class AbstractScheduledActivity(AbstractActivity):
     """Base class for scheduled activities.
-    
+
     Scheduled activities run periodically at a fixed interval.
     Following webMethods SDK pattern for scheduled tasks.
-    
+
     Attributes:
         context: Shared activity context
         logger: Logger for this activity
         stats: Execution statistics
         last_execution_time: Timestamp of last execution
     """
-    
+
     def __init__(self, context: ActivityContext):
         """Initialize scheduled activity.
-        
+
         Args:
             context: Shared activity context
         """
         super().__init__(context)
         self.last_execution_time: Optional[float] = None
-    
+
     @abstractmethod
     def get_interval_seconds(self) -> int:
         """Get the scheduling interval in seconds.
-        
+
         Returns:
             Interval in seconds
         """
         pass
-    
+
     def should_execute(self) -> bool:
         """Check if activity should execute based on interval.
-        
+
         Returns:
             True if interval has elapsed or this is first execution
         """
         if self.last_execution_time is None:
             return True
-        
+
         current_time = time.time()
         elapsed = current_time - self.last_execution_time
         return elapsed >= self.get_interval_seconds()
-    
+
     async def execute(self) -> bool:
         """Execute scheduled activity if interval has elapsed.
-        
+
         Returns:
             True if execution succeeded, False otherwise
         """
         if not self.should_execute():
             return True  # Not time to execute yet, not an error
-        
+
         # Execute the activity
         success = await super().execute()
-        
+
         # Update last execution time
         self.last_execution_time = time.time()
-        
+
         return success
 
 
