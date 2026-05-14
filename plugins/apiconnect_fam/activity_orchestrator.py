@@ -10,12 +10,12 @@ from typing import Any, Dict, List, Optional
 
 # Local
 from .activities.base import AbstractScheduledActivity
+from .activities.register_runtime import RegisterRuntimeActivity
 from .activities.send_heartbeat import SendHeartbeatActivity
 from .activities.send_metrics import SendMetricsActivity
 from .activities.sync_servers import SyncServersActivity
 from .activities.sync_tools import SyncToolsActivity
 from .fam import FAMAssetCatalogClient
-from .handlers.recovery_handler import RecoveryHandler
 from .models import ActivityContext
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,6 @@ class ActivityOrchestrator:
     Attributes:
         context: Shared context for all activities
         fam_client: FAM API client
-        recovery_handler: Recovery handler for missed operations
         activities: List of all managed activities
         _running: Whether orchestrator is running
         _task: Background task for activity execution
@@ -65,10 +64,29 @@ class ActivityOrchestrator:
         self.fam_client = fam_client
         self.runtime_id = runtime_id
 
-        # Initialize handlers
-        self.recovery_handler = RecoveryHandler(fam_client=fam_client, runtime_id=runtime_id)
+        # Extract runtime configuration from plugin config
+        runtime_config = {
+            "name": config.get("fam_runtime_name", "ContextForge Gateway"),
+            "description": config.get("fam_runtime_description", "ContextForge MCP Gateway Runtime"),
+            "type": config.get("fam_runtime_type", "WEBMETHODS_GATEWAY"),
+            "deployment_type": config.get("fam_runtime_deployment_type", "ON_PREMISE"),
+            "region": config.get("fam_runtime_region"),
+            "location": config.get("fam_runtime_location"),
+            "host": config.get("fam_runtime_host"),
+            "tags": config.get("fam_runtime_tags", []),
+            "capacity_value": config.get("fam_runtime_capacity_value", "100"),
+            "capacity_unit": config.get("fam_runtime_capacity_unit", "per minute"),
+            "heartbeat_interval": heartbeat_interval,
+        }
 
-        # Initialize activities
+        # Create registration activity (executed once during start)
+        self.register_activity = RegisterRuntimeActivity(
+            context=self.context,
+            fam_client=fam_client,
+            runtime_config=runtime_config
+        )
+
+        # Initialize scheduled activities
         # Note: Order matters! Servers must sync before tools
         self.activities: List[AbstractScheduledActivity] = []
 
@@ -166,11 +184,33 @@ class ActivityOrchestrator:
         logger.info("Runtime marked as registered - server and tool sync now enabled")
 
     async def start(self) -> None:
-        """Start the orchestrator and begin activity execution."""
+        """Start the orchestrator and begin activity execution.
+        
+        Performs runtime registration first, then starts the activity loop.
+        """
         if self._running:
             logger.warning("ActivityOrchestrator already running")
             return
 
+        # Execute runtime registration before starting activities
+        print(f"\n[ORCHESTRATOR] Performing runtime registration...")
+        logger.info("Executing runtime registration activity")
+        
+        try:
+            await self.register_activity.perform()
+            
+            # Mark runtime as registered (enables server and tool sync)
+            self._runtime_registered = True
+            print(f"[ORCHESTRATOR] ✓ Runtime registration complete - activities enabled")
+            logger.info("Runtime registration complete - all activities enabled")
+            
+        except Exception as e:
+            error_msg = f"Runtime registration failed: {e}"
+            print(f"[ORCHESTRATOR] ✗ {error_msg}")
+            logger.error(error_msg, exc_info=True)
+            raise
+
+        # Start activity execution loop
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         logger.info("ActivityOrchestrator started")
@@ -252,36 +292,11 @@ class ActivityOrchestrator:
 
         Called after runtime registration to recover any missed
         heartbeats, metrics, or asset syncs.
+        
+        TODO: Implement recovery handler
+        - Recover missed heartbeats (send INACTIVE heartbeats for missed intervals)
+        - Recover missed metrics (send historical metrics data)
+        - Recover missed asset syncs (perform full server/tool sync)
+        See: handlers/recovery_handler.py for implementation reference
         """
-        try:
-            logger.info("Triggering recovery of missed operations...")
-            await self.recovery_handler.perform_recovery()
-            logger.info("Recovery completed successfully")
-        except Exception as e:
-            logger.error(f"Error during recovery: {e}", exc_info=True)
-
-    def get_health_status(self) -> Dict[str, Any]:
-        """Get health status of the orchestrator and all activities.
-
-        Returns:
-            Dictionary with health status information
-        """
-        status: Dict[str, Any] = {
-            "running": self._running,
-            "runtime_id": self.runtime_id,
-            "total_activities": len(self.activities),
-            "heartbeat_status": self.heartbeat_activity.get_heartbeat_stats(),
-        }
-
-        # Add optional activity statuses
-        if self.metrics_activity:
-            status["metrics_status"] = self.metrics_activity.get_metrics_stats()
-        if self.server_sync_activity:
-            status["server_sync_status"] = self.server_sync_activity.get_sync_stats()
-        if self.tool_sync_activity:
-            status["tool_sync_status"] = self.tool_sync_activity.get_sync_stats()
-
-        return status
-
-
-# Made with Bob
+        logger.warning("Recovery handler not implemented - skipping recovery")

@@ -1,6 +1,6 @@
 """Register Runtime Activity.
 
-Handles runtime registration with FAM and triggers recovery if needed.
+Handles runtime registration with FAM.
 
 """
 
@@ -9,7 +9,6 @@ from typing import Optional
 
 # Local
 from ..fam import FAMAssetCatalogClient
-from ..handlers import RecoveryHandler
 from ..models import ActivityContext, ReregistrationReport
 from ..utils import RegistrationError, RetryConfig, with_retry
 from .base import AbstractActivity
@@ -21,22 +20,19 @@ class RegisterRuntimeActivity(AbstractActivity):
     Attributes:
         context: Shared activity context
         fam_client: FAM API client
-        recovery_handler: Recovery handler
         runtime_config: Runtime configuration
     """
 
-    def __init__(self, context: ActivityContext, fam_client: FAMAssetCatalogClient, recovery_handler: RecoveryHandler, runtime_config: dict):
+    def __init__(self, context: ActivityContext, fam_client: FAMAssetCatalogClient, runtime_config: dict):
         """Initialize register runtime activity.
 
         Args:
             context: Shared activity context
             fam_client: FAM API client
-            recovery_handler: Recovery handler
             runtime_config: Runtime configuration dictionary
         """
         super().__init__(context)
         self._fam_client = fam_client
-        self._recovery_handler = recovery_handler
         self._runtime_config = runtime_config
         self._runtime_id: Optional[str] = None
 
@@ -81,8 +77,12 @@ class RegisterRuntimeActivity(AbstractActivity):
             # Update context with runtime ID
             self.context.runtime_id = report.runtime_id
             
-            # Handle re-registration report and trigger recovery if needed
-            await self._handle_reregistration_report(report)
+            # TODO: Implement recovery handler for re-registration
+            # When re-registration is detected (status 200/409), should trigger recovery for:
+            # - Missed heartbeats (send INACTIVE heartbeats for missed intervals)
+            # - Missed metrics (send historical metrics data)
+            # - Missed asset syncs (perform full server/tool sync)
+            # See: handlers/recovery_handler.py for implementation reference
             
             print(f"[ACTIVITY] Runtime Registration - Complete")
             print(f"{'='*70}\n")
@@ -126,34 +126,6 @@ class RegisterRuntimeActivity(AbstractActivity):
             raise RegistrationError("FAM API returned no report or runtime ID")
 
         return report
-
-    async def _handle_reregistration_report(self, report: ReregistrationReport) -> None:
-        """Handle re-registration report and trigger recovery.
-
-        Args:
-            report: Re-registration report from FAM
-        """
-        self.logger.info("Processing re-registration report")
-
-        # Check if recovery is needed (timestamps from FAM indicate missed syncs)
-        needs_recovery = any([report.last_heartbeat_time is not None, report.last_metrics_time is not None, report.last_asset_sync_time is not None])
-
-        if needs_recovery:
-            self.logger.info("Recovery needed - triggering recovery tasks")
-
-            # Trigger recovery in background
-            # (In production, this would be done via task queue or executor)
-            recovery_stats = await self._recovery_handler.perform_recovery(
-                last_heartbeat_time=report.last_heartbeat_time,
-                last_metrics_time=report.last_metrics_time,
-                last_asset_sync_time=report.last_asset_sync_time,
-                heartbeat_interval=self._runtime_config.get("heartbeat_interval_seconds", 60),
-                metrics_interval=self._runtime_config.get("metrics_interval_seconds", 300),
-            )
-
-            self.logger.info(f"Recovery completed: {recovery_stats}")
-        else:
-            self.logger.info("No recovery needed - this is first registration")
 
     def get_runtime_id(self) -> Optional[str]:
         """Get the registered runtime ID.

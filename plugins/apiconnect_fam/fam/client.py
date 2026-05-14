@@ -582,30 +582,3 @@ class FAMAssetCatalogClient:
             "submitting metrics",
             default_return=False
         )
-
-    async def check_health(self) -> bool:
-        """Check FAM API health and connectivity.
-        
-        Makes a lightweight API call to verify FAM is reachable and responding.
-        Uses the heartbeat endpoint as a health check since it's lightweight.
-        
-        Returns:
-            True if FAM is healthy and reachable, False otherwise
-        """
-        async def _do_health_check() -> bool:
-            # Use heartbeat endpoint as health check (lightweight operation)
-            import time
-            payload = {"created": int(time.time() * 1000), "runtimeId": self.runtime_id}
-            endpoint = f"{self.base_url}{FAMEndpoints.HEARTBEAT}"
-            response = await self._http_client.post(endpoint, json=payload)
-            response.raise_for_status()
-            logger.debug("FAM health check passed")
-            return True
-        
-        return await self._execute_with_error_handling(
-            _do_health_check,
-            "checking FAM health",
-            default_return=False
-        )
-
-# Made with Bob

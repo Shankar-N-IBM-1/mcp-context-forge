@@ -7,17 +7,9 @@ Features:
 - Runtime registration with FAM
 - Periodic heartbeat to maintain connection
 - Server and tool synchronization with change detection
-- Bulk operations for efficient syncing
 - Metrics synchronization
-- Activity-based architecture following webMethods Agent SDK patterns
-- Automatic recovery of missed operations after downtime
-- Status 409 (Conflict) handling for existing runtimes
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
-import asyncio
 import logging
 from typing import List, Optional
 
@@ -152,75 +144,6 @@ class APIConnectFAMPlugin(Plugin):
             
             logger.info(f"FAM sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
             
-            # Check FAM health before attempting registration
-            print(f"\n[PLUGIN] Checking FAM API health...")
-            logger.info("Performing pre-initialization FAM health check")
-            
-            try:
-                is_healthy = await self._fam_client.check_health()
-                if not is_healthy:
-                    error_msg = "FAM health check failed - API is not responding. Cannot proceed with initialization."
-                    print(f"[PLUGIN] ✗ {error_msg}")
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                print(f"[PLUGIN] ✓ FAM API is healthy and reachable")
-                logger.info("FAM health check passed - proceeding with runtime registration")
-                
-            except Exception as e:
-                error_msg = f"FAM health check failed: {e}"
-                print(f"[PLUGIN] ✗ {error_msg}")
-                logger.error(error_msg, exc_info=True)
-                raise ValueError(error_msg)
-            
-            # Register/re-register runtime in FAM
-            print(f"\n[PLUGIN] Registering runtime with FAM...")
-            logger.info(f"Registering runtime in FAM: {self._runtime_id}")
-            
-            try:
-                # Register runtime with configuration-based capabilities
-                report = await self._fam_client.register_runtime(
-                    name=self._cfg.fam_runtime_name,
-                    description=self._cfg.fam_runtime_description,
-                    runtime_type=self._cfg.fam_runtime_type,
-                    deployment_type=self._cfg.fam_runtime_deployment_type,
-                    region=self._cfg.fam_runtime_region,
-                    location=self._cfg.fam_runtime_location,
-                    host=self._cfg.fam_runtime_host,
-                    tags=self._cfg.fam_runtime_tags,
-                    capacity_value=self._cfg.fam_runtime_capacity_value,
-                    capacity_unit=self._cfg.fam_runtime_capacity_unit,
-                    heartbeat_interval=self._cfg.fam_runtime_heartbeat_interval_seconds,  # Send in seconds
-                    publish_assets=self._cfg.fam_asset_sync_enabled,
-                    sync_assets=self._cfg.fam_asset_sync_enabled,
-                    send_metrics=self._cfg.metrics_sync_enabled
-                )
-                
-                if not report:
-                    error_msg = f"Failed to register runtime {self._runtime_id} in FAM"
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                # Determine if this is first-time registration or re-registration
-                is_reregistration = report.is_reregistration()
-                status_text = "re-registered" if is_reregistration else "registered"
-                
-                print(f"[PLUGIN] ✓ Runtime {status_text} successfully")
-                print(f"[PLUGIN]   Status Code: {report.status_code}")
-                if report.last_heartbeat_time:
-                    print(f"[PLUGIN]   Last Heartbeat: {report.last_heartbeat_time}")
-                if report.last_metrics_time:
-                    print(f"[PLUGIN]   Last Metrics: {report.last_metrics_time}")
-                if report.last_asset_sync_time:
-                    print(f"[PLUGIN]   Last Asset Sync: {report.last_asset_sync_time}")
-                
-                logger.info(f"Runtime {self._runtime_id} {status_text} in FAM, report: {report.model_dump()}")
-                
-            except Exception as e:
-                error_msg = f"Failed to register runtime: {e}"
-                logger.error(error_msg, exc_info=True)
-                raise ValueError(error_msg)
-            
             # Initialize activity orchestrator
             self._orchestrator = ActivityOrchestrator(
                 fam_client=self._fam_client,
@@ -233,46 +156,15 @@ class APIConnectFAMPlugin(Plugin):
                 tool_sync_interval=self._cfg.fam_asset_sync_interval if self._cfg.fam_asset_sync_enabled else 0
             )
             
-            # Mark runtime as registered (enables server and tool sync)
-            self._orchestrator.mark_runtime_registered()
-            print(f"[PLUGIN] ✓ Runtime registration complete - server and tool sync enabled")
-            logger.info("Runtime registration complete - server and tool sync enabled")
-            
-            # Start orchestrator
+            # Start orchestrator (will perform registration first, then start activities)
             print(f"\n[PLUGIN] Starting activity orchestrator...")
             await self._orchestrator.start()
             print(f"[PLUGIN] ✓ Activity orchestrator started")
             logger.info("Activity orchestrator started")
             
-            # Trigger recovery asynchronously only if this is a re-registration (status 200)
-            if report and report.is_reregistration():
-                status_msg = "status 200" if report.status_code == 200 else f"status {report.status_code} (conflict)"
-                print(f"\n[PLUGIN] Re-registration detected ({status_msg})")
-                print(f"[PLUGIN] Scheduling recovery of missed operations...")
-                logger.info(f"Re-registration detected ({status_msg}) - scheduling recovery of missed operations...")
-                
-                # Schedule recovery to run asynchronously (don't block initialization)
-                asyncio.create_task(self._trigger_recovery_async())
-            else:
-                print(f"\n[PLUGIN] First-time registration - no recovery needed")
-                logger.info("First-time registration (status 201) - no recovery needed")
-            
             print(f"\n{'#'*80}")
             print(f"# API Connect FAM Plugin - Ready")
             print(f"{'#'*80}\n")
-
-    async def _trigger_recovery_async(self) -> None:
-        """Trigger recovery of missed operations asynchronously.
-        
-        This method is called after re-registration to recover any missed
-        heartbeats, metrics, or asset syncs that occurred during downtime.
-        """
-        try:
-            if self._orchestrator:
-                await self._orchestrator.trigger_recovery()
-                logger.info("Recovery completed successfully")
-        except Exception as e:
-            logger.error(f"Error during recovery: {e}", exc_info=True)
 
     async def shutdown(self) -> None:
         """Stop the activity orchestrator and close HTTP client."""
@@ -288,5 +180,3 @@ class APIConnectFAMPlugin(Plugin):
             await self._fam_client.close()
             self._fam_client = None
             logger.info("FAM client closed")
-
-# Made with Bob
