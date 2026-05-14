@@ -33,8 +33,8 @@ plugins:
       
       # FAM sync configuration (disabled by default)
       fam_enabled: true
-      fam_base_url: "https://localhost:444"
-      fam_runtime_id: "0f8320a0-6a63-45b5-8217-a7488f150988"  # REQUIRED: Runtime ID from FAM registration
+      fam_base_url: "http://localhost:3000"
+      fam_runtime_id: "0f8320a0-6a63-45b5-8217-a7488f150980"  # REQUIRED: Runtime ID from FAM registration
       fam_username: "Administrator"  # FAM username for Basic Authentication
       fam_password: "Welcome@123"    # FAM password for Basic Authentication
       fam_timeout: 30
@@ -54,11 +54,11 @@ plugins:
       fam_runtime_heartbeat_interval_seconds: 60  # Heartbeat interval in seconds (converted to ms for FAM, also used for activity interval)
       
       # Asset sync configuration (servers and tools)
-      fam_asset_sync_enabled: false # Enable asset (servers/tools) synchronization to FAM
+      fam_asset_sync_enabled: true # Enable asset (servers/tools) synchronization to FAM
       fam_asset_sync_interval: 60   # Sync assets every 60 seconds
       
       # Metrics sync configuration (disabled by default)
-      metrics_sync_enabled: false  # Enable metrics synchronization to FAM
+      metrics_sync_enabled: true  # Enable metrics synchronization to FAM
       metrics_sync_interval: 300   # Sync metrics every 5 minutes (300 seconds)
 
   # Argument Normalizer - stabilize inputs before anything else

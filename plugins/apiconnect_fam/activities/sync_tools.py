@@ -130,29 +130,19 @@ class SyncToolsActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If sync fails
         """
-        print(f"\n{'='*70}")
-        print(f"[ACTIVITY] Sync Tools - Starting")
-        print(f"{'='*70}")
         
         try:
             # Query and sync tools
-            print(f"[ACTIVITY] Querying tools from database...")
             tools_synced = await with_retry(self._query_and_sync_tools, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Sync Tools")
 
             # Track success
             self._total_tools_synced += tools_synced
 
-            print(f"[ACTIVITY] ✓ Synced {tools_synced} tools to FAM")
-            print(f"[ACTIVITY]   Total tools synced: {self._total_tools_synced}")
             self.logger.info(f"Synced {tools_synced} tools to FAM (total: {self._total_tools_synced})")
-            print(f"[ACTIVITY] Sync Tools - Complete")
-            print(f"{'='*70}\n")
 
         except Exception as e:
-            print(f"[ACTIVITY] ✗ Tool sync failed: {e}")
             error_msg = f"Failed to sync tools: {e}"
             self.logger.error(error_msg, exc_info=True)
-            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _query_and_sync_tools(self) -> int:
@@ -164,15 +154,12 @@ class SyncToolsActivity(AbstractScheduledActivity):
         Raises:
             Exception: If query or sync fails
         """
-        print(f"[ACTION] Querying database for tools...")
         with SessionLocal() as db:
             # Eager load the servers relationship to avoid N+1 queries
             tools = db.query(Tool).options(joinedload(Tool.servers)).all()
             servers = db.query(Server).all()
-            print(f"[ACTION]   Found {len(tools)} tools and {len(servers)} servers in database")
 
             if not tools:
-                print(f"[ACTION] No tools to sync")
                 self.logger.debug("No tools to sync")
                 return 0
 
@@ -180,13 +167,11 @@ class SyncToolsActivity(AbstractScheduledActivity):
             registered_servers = set()
             if self._orchestrator:
                 registered_servers = self._orchestrator.get_registered_servers()
-                print(f"[ACTION] Found {len(registered_servers)} registered servers in FAM")
 
             # Build tool-to-server mapping (only for registered servers)
             tool_to_server = self._build_tool_server_mapping(servers, registered_servers)
 
             # Detect changes and group by server and operation
-            print(f"[ACTION] Detecting changes using hash-based comparison...")
             tools_by_server = self._group_tools_by_server_and_operation(tools, tool_to_server)
 
             # Process bulk operations per server
@@ -194,18 +179,18 @@ class SyncToolsActivity(AbstractScheduledActivity):
             for server_id, operations in tools_by_server.items():
                 # Check if server is registered to FAM
                 if server_id not in registered_servers:
-                    print(f"[ACTION] ⏸ Skipping tools for server {server_id} - server not yet registered to FAM")
+                    self.logger.debug(f"Skipping tools for server {server_id} - server not yet registered to FAM")
                     continue
                 
-                print(f"[ACTION] Processing tools for server {server_id}...")
+                self.logger.debug(f"Processing tools for server {server_id}...")
                 
                 # Bulk create new tools
                 if operations["create"]:
-                    print(f"[ACTION]   {len(operations['create'])} NEW tools to create")
-                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/create")
+                    self.logger.debug(f"{len(operations['create'])} NEW tools to create")
+                    self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/create")
                     job_id = await self._fam_client.bulk_create_tools(operations["create"], server_id)
                     if job_id:
-                        print(f"[ACTION] ✓ Bulk create job submitted: {job_id}")
+                        self.logger.debug(f"Bulk create job submitted: {job_id}")
                         # Mark all as synced
                         for tool in operations["create"]:
                             tool_id = str(tool.id)
@@ -213,15 +198,15 @@ class SyncToolsActivity(AbstractScheduledActivity):
                             self._state_tracker.mark_synced(tool_id, current_hash)
                         total_synced += len(operations["create"])
                     else:
-                        print(f"[ACTION] ✗ Bulk create failed")
+                        self.logger.warning("Bulk create failed")
 
                 # Bulk update changed tools
                 if operations["update"]:
-                    print(f"[ACTION]   {len(operations['update'])} CHANGED tools to update")
-                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/update")
+                    self.logger.debug(f"{len(operations['update'])} CHANGED tools to update")
+                    self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/update")
                     job_id = await self._fam_client.bulk_update_tools(operations["update"], server_id)
                     if job_id:
-                        print(f"[ACTION] ✓ Bulk update job submitted: {job_id}")
+                        self.logger.debug(f"Bulk update job submitted: {job_id}")
                         # Mark all as synced
                         for tool in operations["update"]:
                             tool_id = str(tool.id)
@@ -229,23 +214,22 @@ class SyncToolsActivity(AbstractScheduledActivity):
                             self._state_tracker.mark_synced(tool_id, current_hash)
                         total_synced += len(operations["update"])
                     else:
-                        print(f"[ACTION] ✗ Bulk update failed")
+                        self.logger.warning("Bulk update failed")
 
                 # Bulk delete removed tools
                 if operations["delete"]:
-                    print(f"[ACTION]   {len(operations['delete'])} tools to delete")
-                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/delete")
+                    self.logger.debug(f"{len(operations['delete'])} tools to delete")
+                    self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/delete")
                     job_id = await self._fam_client.bulk_delete_tools(operations["delete"], server_id)
                     if job_id:
-                        print(f"[ACTION] ✓ Bulk delete job submitted: {job_id}")
+                        self.logger.debug(f"Bulk delete job submitted: {job_id}")
                         # Mark all as deleted
                         for tool_id in operations["delete"]:
                             self._state_tracker.mark_deleted(tool_id)
                         total_synced += len(operations["delete"])
                     else:
-                        print(f"[ACTION] ✗ Bulk delete failed")
+                        self.logger.warning("Bulk delete failed")
 
-            print(f"[ACTION] ✓ Tool sync processing complete ({total_synced} tools synced)")
             self.logger.info(f"Synced {total_synced} tools to FAM using bulk operations")
             return total_synced
 

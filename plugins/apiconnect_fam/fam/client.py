@@ -385,11 +385,17 @@ class FAMAssetCatalogClient:
             server: ContextForge Server ORM object
 
         Returns:
-            True if successful, False otherwise
+            True if successful (including 409 Conflict - server already exists), False otherwise
         """
         async def _do_create() -> bool:
             payload = FAMServerPayload.build_create_payload(server)
             response = await self._http_client.post(self._endpoint, json=payload)
+            
+            # Handle 409 Conflict as success (server already exists in FAM)
+            if response.status_code == 409:
+                logger.info(f"Server {server.id} already exists in FAM (409 Conflict - treated as success)")
+                return True
+            
             response.raise_for_status()
             logger.info(f"Created MCP Server {server.id} in FAM")
             return True

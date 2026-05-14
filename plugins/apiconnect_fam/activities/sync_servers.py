@@ -108,29 +108,19 @@ class SyncServersActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If sync fails
         """
-        print(f"\n{'='*70}")
-        print(f"[ACTIVITY] Sync Servers - Starting")
-        print(f"{'='*70}")
         
         try:
             # Query and sync servers
-            print(f"[ACTIVITY] Querying servers from database...")
             servers_synced = await with_retry(self._query_and_sync_servers, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Sync Servers")
 
             # Track success
             self._total_servers_synced += servers_synced
 
-            print(f"[ACTIVITY] ✓ Synced {servers_synced} servers to FAM")
-            print(f"[ACTIVITY]   Total servers synced: {self._total_servers_synced}")
             self.logger.info(f"Synced {servers_synced} servers to FAM (total: {self._total_servers_synced})")
-            print(f"[ACTIVITY] Sync Servers - Complete")
-            print(f"{'='*70}\n")
 
         except Exception as e:
-            print(f"[ACTIVITY] ✗ Server sync failed: {e}")
             error_msg = f"Failed to sync servers: {e}"
             self.logger.error(error_msg, exc_info=True)
-            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _query_and_sync_servers(self) -> int:
@@ -142,17 +132,13 @@ class SyncServersActivity(AbstractScheduledActivity):
         Raises:
             Exception: If query or sync fails
         """
-        print(f"[ACTION] Querying database for servers...")
         with SessionLocal() as db:
             servers = db.query(Server).all()
-            print(f"[ACTION]   Found {len(servers)} servers in database")
 
             if not servers:
-                print(f"[ACTION] No servers to sync")
                 self.logger.debug("No servers to sync")
                 return 0
 
-            print(f"[ACTION] Processing {len(servers)} servers for sync...")
             
             synced_count = 0
             for server in servers:
@@ -167,21 +153,21 @@ class SyncServersActivity(AbstractScheduledActivity):
                     has_changed = self._state_tracker.has_changed(server_id, current_hash)
                     
                     if is_new:
-                        print(f"[ACTION] Server {server_id} is NEW, syncing...")
+                        self.logger.debug(f"Server {server_id} is NEW, syncing...")
                     elif has_changed:
-                        print(f"[ACTION] Server {server_id} has CHANGED, syncing...")
+                        self.logger.debug(f"Server {server_id} has CHANGED, syncing...")
                     else:
-                        print(f"[ACTION] Server {server_id} unchanged, skipping")
+                        self.logger.debug(f"Server {server_id} unchanged, skipping")
                         continue
                     
                     # Try to create server in FAM
-                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers")
-                    print(f"[ACTION]   Server ID: {server.id}, Name: {server.name}")
+                    self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers")
+                    self.logger.debug(f"Server ID: {server.id}, Name: {server.name}")
                     
                     success = await self._fam_client.create_server(server)
                     
                     if success:
-                        print(f"[ACTION] ✓ Server created/updated in FAM: {server.id}")
+                        self.logger.debug(f"Server created/updated in FAM: {server.id}")
                         # Mark as synced in state tracker
                         self._state_tracker.mark_synced(server_id, current_hash)
                         synced_count += 1
@@ -190,12 +176,10 @@ class SyncServersActivity(AbstractScheduledActivity):
                         if self._orchestrator:
                             self._orchestrator.mark_server_synced(server_id)
                     else:
-                        print(f"[ACTION] ✗ Failed to sync server: {server.id}")
+                        self.logger.warning(f"Failed to sync server: {server.id}")
                         
                 except Exception as e:
-                    print(f"[ACTION] ✗ Error syncing server {server.id}: {e}")
                     self.logger.error(f"Error syncing server {server.id}: {e}", exc_info=True)
 
-            print(f"[ACTION] ✓ Server sync processing complete ({synced_count}/{len(servers)} synced)")
             self.logger.info(f"Synced {synced_count} servers to FAM")
             return synced_count

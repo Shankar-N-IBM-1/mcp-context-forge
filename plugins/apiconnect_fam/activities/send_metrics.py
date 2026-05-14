@@ -54,29 +54,19 @@ class SendMetricsActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If metrics sync fails
         """
-        print(f"\n{'='*70}")
-        print(f"[ACTIVITY] Send Metrics - Starting")
-        print(f"{'='*70}")
         
         try:
             # Query and send metrics
-            print(f"[ACTIVITY] Querying metrics from database...")
             metrics_count = await with_retry(self._query_and_send_metrics, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Send Metrics")
 
             # Track success
             self._total_metrics_sent += metrics_count
 
-            print(f"[ACTIVITY] ✓ Sent {metrics_count} metrics to FAM")
-            print(f"[ACTIVITY]   Total metrics sent: {self._total_metrics_sent}")
             self.logger.info(f"Sent {metrics_count} metrics to FAM (total: {self._total_metrics_sent})")
-            print(f"[ACTIVITY] Send Metrics - Complete")
-            print(f"{'='*70}\n")
 
         except Exception as e:
-            print(f"[ACTIVITY] ✗ Metrics send failed: {e}")
             error_msg = f"Failed to send metrics: {e}"
             self.logger.error(error_msg, exc_info=True)
-            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _query_and_send_metrics(self) -> int:
@@ -88,7 +78,6 @@ class SendMetricsActivity(AbstractScheduledActivity):
         Raises:
             Exception: If query or send fails
         """
-        print(f"[ACTION] Querying database for metrics...")
         with SessionLocal() as db:
             # Get all servers and tools
             servers = db.query(Server).all()
@@ -103,18 +92,17 @@ class SendMetricsActivity(AbstractScheduledActivity):
             tool_metrics_raw = db.query(ToolMetric).filter(ToolMetric.timestamp >= time_window_start).all()
 
             total_metrics = len(server_metrics_raw) + len(tool_metrics_raw)
-            print(f"[ACTION]   Found {total_metrics} metrics (servers: {len(server_metrics_raw)}, tools: {len(tool_metrics_raw)})")
 
             # Organize metrics
             server_metrics_map = self._organize_server_metrics(server_metrics_raw)
             tool_metrics_by_server = self._organize_tool_metrics(tool_metrics_raw, servers)
 
             # Build and send metrics payload (always send, even if empty)
-            print(f"[ACTION] Calling FAM API: POST /api/engine/v3/runtimes/.../metrics")
             if total_metrics == 0:
-                print(f"[ACTION]   Sending empty metrics payload (no metrics in time window)")
+                self.logger.debug("Sending empty metrics payload (no metrics in time window)")
             
             # Build payload using FAMMetricsPayload builder
+            self.logger.debug(f"Calling FAM API: POST /api/engine/v3/runtimes/.../metrics")
             payload = FAMMetricsPayload.build_payload(
                 timestamp=datetime.now(timezone.utc),
                 server_metrics_map=dict(server_metrics_map),
@@ -125,12 +113,12 @@ class SendMetricsActivity(AbstractScheduledActivity):
 
             if success:
                 if total_metrics > 0:
-                    print(f"[ACTION] ✓ FAM API call successful ({total_metrics} metrics sent)")
+                    self.logger.debug(f"FAM API call successful ({total_metrics} metrics sent)")
                 else:
-                    print(f"[ACTION] ✓ FAM API call successful (empty metrics payload sent)")
+                    self.logger.debug("FAM API call successful (empty metrics payload sent)")
                 return total_metrics
             else:
-                print(f"[ACTION] ✗ FAM API call failed")
+                self.logger.error("FAM API call failed")
                 return 0
 
     def _organize_server_metrics(self, metrics: List[Any]) -> Dict[str, List[Any]]:

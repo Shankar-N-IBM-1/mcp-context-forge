@@ -193,7 +193,6 @@ class ActivityOrchestrator:
             return
 
         # Execute runtime registration before starting activities
-        print(f"\n[ORCHESTRATOR] Performing runtime registration...")
         logger.info("Executing runtime registration activity")
         
         try:
@@ -201,12 +200,10 @@ class ActivityOrchestrator:
             
             # Mark runtime as registered (enables server and tool sync)
             self._runtime_registered = True
-            print(f"[ORCHESTRATOR] ✓ Runtime registration complete - activities enabled")
             logger.info("Runtime registration complete - all activities enabled")
             
         except Exception as e:
             error_msg = f"Runtime registration failed: {e}"
-            print(f"[ORCHESTRATOR] ✗ {error_msg}")
             logger.error(error_msg, exc_info=True)
             raise
 

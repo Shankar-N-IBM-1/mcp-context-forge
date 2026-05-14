@@ -42,35 +42,27 @@ class RegisterRuntimeActivity(AbstractActivity):
         Raises:
             RegistrationError: If registration fails
         """
-        print(f"\n{'='*70}")
-        print(f"[ACTIVITY] Runtime Registration - Starting")
-        print(f"{'='*70}")
-        
         self.logger.info("Registering runtime with FAM")
 
         try:
             # Register runtime with retry logic
-            print(f"[ACTIVITY] Attempting runtime registration with FAM...")
+            self.logger.debug("Attempting runtime registration with FAM...")
             report = await with_retry(self._register_runtime, retry_config=RetryConfig(max_attempts=3, initial_delay=2.0), operation_name="Runtime Registration")
 
             if not report or not report.runtime_id:
-                print(f"[ACTIVITY] ✗ Runtime registration failed - no runtime ID returned")
                 raise RegistrationError("Runtime registration returned no runtime ID")
 
             self._runtime_id = report.runtime_id
-            print(f"[ACTIVITY] ✓ Runtime registered successfully")
-            print(f"[ACTIVITY]   Runtime ID: {report.runtime_id}")
-            print(f"[ACTIVITY]   Status Code: {report.status_code}")
             
             # Check if this is a re-registration (200/409) or first registration (201)
             if report.status_code in (200, 409):
-                print(f"[ACTIVITY]   Re-registration detected (status {report.status_code})")
+                self.logger.info(f"Re-registration detected (status {report.status_code})")
                 if any([report.last_heartbeat_time, report.last_metrics_time, report.last_asset_sync_time]):
-                    print(f"[ACTIVITY]   Last heartbeat: {report.last_heartbeat_time}")
-                    print(f"[ACTIVITY]   Last metrics: {report.last_metrics_time}")
-                    print(f"[ACTIVITY]   Last asset sync: {report.last_asset_sync_time}")
+                    self.logger.info(f"Last heartbeat: {report.last_heartbeat_time}")
+                    self.logger.info(f"Last metrics: {report.last_metrics_time}")
+                    self.logger.info(f"Last asset sync: {report.last_asset_sync_time}")
             else:
-                print(f"[ACTIVITY]   First-time registration (status {report.status_code})")
+                self.logger.info(f"First-time registration (status {report.status_code})")
             
             self.logger.info(f"Runtime registered successfully with ID: {report.runtime_id}, status: {report.status_code}")
 
@@ -83,9 +75,6 @@ class RegisterRuntimeActivity(AbstractActivity):
             # - Missed metrics (send historical metrics data)
             # - Missed asset syncs (perform full server/tool sync)
             # See: handlers/recovery_handler.py for implementation reference
-            
-            print(f"[ACTIVITY] Runtime Registration - Complete")
-            print(f"{'='*70}\n")
 
         except Exception as e:
             error_msg = f"Runtime registration failed: {e}"
@@ -101,9 +90,9 @@ class RegisterRuntimeActivity(AbstractActivity):
         Raises:
             Exception: If registration fails
         """
-        print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v2/runtimes")
-        print(f"[ACTION]   Runtime Name: {self._runtime_config.get('name', 'ContextForge Gateway')}")
-        print(f"[ACTION]   Runtime Type: {self._runtime_config.get('type', 'WEBMETHODS_GATEWAY')}")
+        self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v2/runtimes")
+        self.logger.debug(f"Runtime Name: {self._runtime_config.get('name', 'ContextForge Gateway')}")
+        self.logger.debug(f"Runtime Type: {self._runtime_config.get('type', 'WEBMETHODS_GATEWAY')}")
         
         report = await self._fam_client.register_runtime(
             name=self._runtime_config.get("name", "ContextForge Gateway"),
@@ -120,9 +109,8 @@ class RegisterRuntimeActivity(AbstractActivity):
         )
 
         if report and report.runtime_id:
-            print(f"[ACTION] ✓ FAM API call successful")
+            self.logger.debug("FAM API call successful")
         else:
-            print(f"[ACTION] ✗ FAM API call failed")
             raise RegistrationError("FAM API returned no report or runtime ID")
 
         return report

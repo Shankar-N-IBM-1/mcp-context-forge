@@ -132,17 +132,12 @@ class APIConnectFAMPlugin(Plugin):
                 verify_ssl=self._cfg.fam_verify_ssl
             )
             
-            print(f"\n{'#'*80}")
-            print(f"# API Connect FAM Plugin - Initialization")
-            print(f"{'#'*80}")
-            print(f"[PLUGIN] FAM Base URL: {self._cfg.fam_base_url}")
-            print(f"[PLUGIN] Runtime ID: {self._runtime_id}")
-            print(f"[PLUGIN] Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
-            print(f"[PLUGIN] Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
-            print(f"[PLUGIN] Circuit Breaker: Enabled (default)")
-            print(f"{'#'*80}\n")
-            
             logger.info(f"FAM sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
+            logger.info(f"FAM Base URL: {self._cfg.fam_base_url}")
+            logger.info(f"Runtime ID: {self._runtime_id}")
+            logger.info(f"Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
+            logger.info(f"Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
+            logger.info(f"Circuit Breaker: Enabled (default)")
             
             # Initialize activity orchestrator
             self._orchestrator = ActivityOrchestrator(
@@ -157,14 +152,9 @@ class APIConnectFAMPlugin(Plugin):
             )
             
             # Start orchestrator (will perform registration first, then start activities)
-            print(f"\n[PLUGIN] Starting activity orchestrator...")
+            logger.info("Starting activity orchestrator...")
             await self._orchestrator.start()
-            print(f"[PLUGIN] ✓ Activity orchestrator started")
-            logger.info("Activity orchestrator started")
-            
-            print(f"\n{'#'*80}")
-            print(f"# API Connect FAM Plugin - Ready")
-            print(f"{'#'*80}\n")
+            logger.info("Activity orchestrator started - plugin ready")
 
     async def shutdown(self) -> None:
         """Stop the activity orchestrator and close HTTP client."""
