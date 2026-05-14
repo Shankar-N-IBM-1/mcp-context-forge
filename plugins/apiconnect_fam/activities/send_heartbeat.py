@@ -1,14 +1,10 @@
 """Send Heartbeat Activity.
 
 Sends runtime heartbeat to FAM periodically.
-Follows webMethods Agent SDK SendHeartbeatActivity pattern.
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Local
-from ..fam_client import FAMAssetCatalogClient
+from ..fam import FAMAssetCatalogClient
 from ..models import ActivityContext
 from ..utils import RetryConfig, SyncError, with_retry
 from .base import AbstractScheduledActivity
@@ -16,12 +12,6 @@ from .base import AbstractScheduledActivity
 
 class SendHeartbeatActivity(AbstractScheduledActivity):
     """Activity for sending runtime heartbeat to FAM.
-
-    Following webMethods SDK pattern, this activity:
-    1. Sends heartbeat at configured interval
-    2. Updates timestamp storage
-    3. Tracks success/failure statistics
-    4. Uses retry logic for transient failures
 
     Attributes:
         context: Shared activity context
@@ -57,24 +47,31 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If heartbeat fails after retries
         """
+        print(f"\n{'='*70}")
+        print(f"[ACTIVITY] Send Heartbeat - Starting")
+        print(f"{'='*70}")
+        
         try:
-            print(f"🔄 [FAM Heartbeat] Sending heartbeat to FAM...")
-            
             # Send heartbeat with retry logic
+            print(f"[ACTIVITY] Sending heartbeat to FAM...")
             await with_retry(self._send_heartbeat, retry_config=RetryConfig(max_attempts=2, initial_delay=0.5), operation_name="Send Heartbeat")
 
             # Track success
             self._consecutive_failures = 0
             self._total_heartbeats_sent += 1
 
-            print(f"✅ [FAM Heartbeat] Sent successfully (total: {self._total_heartbeats_sent})")
+            print(f"[ACTIVITY] ✓ Heartbeat sent successfully")
+            print(f"[ACTIVITY]   Total heartbeats sent: {self._total_heartbeats_sent}")
             self.logger.debug(f"Heartbeat sent successfully (total: {self._total_heartbeats_sent})")
+            print(f"[ACTIVITY] Send Heartbeat - Complete")
+            print(f"{'='*70}\n")
 
         except Exception as e:
             self._consecutive_failures += 1
+            print(f"[ACTIVITY] ✗ Heartbeat failed (consecutive failures: {self._consecutive_failures})")
             error_msg = f"Failed to send heartbeat (consecutive failures: {self._consecutive_failures}): {e}"
-            print(f"❌ [FAM Heartbeat] {error_msg}")
             self.logger.error(error_msg, exc_info=True)
+            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _send_heartbeat(self) -> None:
@@ -83,20 +80,14 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
         Raises:
             Exception: If heartbeat fails
         """
-        await self._fam_client.send_heartbeat(self.context.runtime_id)
+        print(f"[ACTION] Calling FAM API: POST /api/engine/v2/runtimes/heartbeat")
+        print(f"[ACTION]   Runtime ID: {self.context.runtime_id}")
+        
+        success = await self._fam_client.send_heartbeat(self.context.runtime_id)
+        
+        if success:
+            print(f"[ACTION] ✓ FAM API call successful")
+        else:
+            print(f"[ACTION] ✗ FAM API call failed")
+            raise Exception("Heartbeat failed")
 
-    def get_heartbeat_stats(self) -> dict:
-        """Get heartbeat statistics.
-
-        Returns:
-            Dictionary with heartbeat stats
-        """
-        return {
-            "total_sent": self._total_heartbeats_sent,
-            "consecutive_failures": self._consecutive_failures,
-            "interval_seconds": self._heartbeat_interval,
-            "last_execution": (self.last_execution_time if self.last_execution_time else None),
-        }
-
-
-# Made with Bob

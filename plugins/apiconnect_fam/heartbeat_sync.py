@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Optional
 
-from .fam_client import FAMAssetCatalogClient
+from .fam import FAMAssetCatalogClient
 
 logger = logging.getLogger(__name__)
 

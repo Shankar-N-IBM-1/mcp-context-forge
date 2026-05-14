@@ -12,7 +12,7 @@ from typing import Optional
 
 from mcpgateway.db import Server, SessionLocal
 
-from .fam_client import FAMAssetCatalogClient
+from .fam import FAMAssetCatalogClient
 from .server_sync import ServerSyncTask
 from .tool_sync import ToolSyncTask
 from .metrics_sync import MetricsSyncTask

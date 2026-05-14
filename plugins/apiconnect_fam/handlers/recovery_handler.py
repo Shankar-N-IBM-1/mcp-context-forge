@@ -14,7 +14,7 @@ from typing import List, Optional
 from mcpgateway.db import SessionLocal, Server, Tool, ServerMetric, ToolMetric
 
 from ..models import InactiveHeartbeat
-from ..fam_client import FAMAssetCatalogClient
+from ..fam import FAMAssetCatalogClient
 
 logger = logging.getLogger(__name__)
 

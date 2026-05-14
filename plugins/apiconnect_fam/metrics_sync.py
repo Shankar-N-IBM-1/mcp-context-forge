@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from mcpgateway.db import Server, ServerMetric, Tool, ToolMetric, SessionLocal
 
-from .fam_client import FAMAssetCatalogClient, FAMMetricsPayload
+from .fam import FAMAssetCatalogClient, FAMMetricsPayload
 
 logger = logging.getLogger(__name__)
 

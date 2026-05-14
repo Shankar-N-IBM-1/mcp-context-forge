@@ -1,40 +1,94 @@
 """Sync Tools Activity.
 
 Syncs MCP tools to FAM Asset Catalog using bulk operations.
-Follows webMethods Agent SDK SyncAssetsActivity pattern.
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
+import json
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+
+# Third-Party
+from sqlalchemy.orm import joinedload
 
 # First-Party
 from mcpgateway.db import Server, SessionLocal, Tool
 
 # Local
-from ..fam_client import FAMAssetCatalogClient, ToolStateTracker
+from ..fam import FAMAssetCatalogClient
 from ..models import ActivityContext
 from ..utils import RetryConfig, SyncError, with_retry
 from .base import AbstractScheduledActivity
+from .state_tracker import AbstractStateTracker
 
 if TYPE_CHECKING:
     # Local
     from ..activity_orchestrator import ActivityOrchestrator
 
 
+class ToolStateTracker(AbstractStateTracker):
+    """Tracks tool state for change detection using content hashing.
+
+    Since we use bulk operations that return job IDs, we only need to track
+    content hashes. Once a bulk job is submitted successfully, all tools in
+    that batch are considered synced.
+
+    Extends AbstractStateTracker with tool-specific hash computation.
+    """
+
+    @staticmethod
+    def compute_hash(entity: Any) -> str:
+        """Compute SHA-256 hash of tool content.
+
+        Includes: name, description, enabled, tags, request_type, input_schema, output_schema
+
+        Args:
+            entity: ContextForge Tool ORM object
+
+        Returns:
+            SHA-256 hash string
+        """
+        tool_data = {
+            "name": entity.original_name or entity.custom_name,
+            "description": entity.description or entity.original_description,
+            "enabled": entity.enabled,
+            "tags": sorted(entity.tags) if entity.tags else [],
+            "request_type": entity.request_type,
+            "input_schema": json.dumps(entity.input_schema, sort_keys=True) if entity.input_schema else "",
+            "output_schema": json.dumps(entity.output_schema, sort_keys=True) if entity.output_schema else "",
+        }
+        return AbstractStateTracker._compute_hash_from_dict(tool_data)
+
+    def is_new_tool(self, tool_id: str) -> bool:
+        """Check if tool is new (not yet synced to FAM).
+
+        Convenience method that delegates to base class is_new().
+
+        Args:
+            tool_id: Tool identifier
+
+        Returns:
+            True if tool is new (no hash in cache)
+        """
+        return self.is_new(tool_id)
+
+    def get_deleted_tools(self, current_tool_ids: Set[str]) -> Set[str]:
+        """Get tools that were synced to FAM but no longer exist in DB.
+
+        Convenience method that delegates to base class get_deleted_entities().
+
+        Args:
+            current_tool_ids: Set of current tool IDs from database
+
+        Returns:
+            Set of tool IDs that were deleted
+        """
+        return self.get_deleted_entities(current_tool_ids)
+
+
 class SyncToolsActivity(AbstractScheduledActivity):
     """Activity for syncing MCP tools to FAM.
 
-    Following webMethods SDK pattern, this activity:
-    1. Queries tools from database
-    2. Gets server ID mapping from orchestrator
-    3. Detects changes via hash comparison
-    4. Syncs CREATE/UPDATE/DELETE to FAM (using FAM server ID as mcpServerId)
-    5. Updates timestamp storage
-    6. Tracks statistics
 
     IMPORTANT: This activity depends on SyncServersActivity completing first,
     because tools need the FAM server ID as mcpServerId.
@@ -76,22 +130,29 @@ class SyncToolsActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If sync fails
         """
+        print(f"\n{'='*70}")
+        print(f"[ACTIVITY] Sync Tools - Starting")
+        print(f"{'='*70}")
+        
         try:
-            print(f"🔄 [FAM Tool Sync] Syncing tools to FAM...")
-            
             # Query and sync tools
+            print(f"[ACTIVITY] Querying tools from database...")
             tools_synced = await with_retry(self._query_and_sync_tools, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Sync Tools")
 
             # Track success
             self._total_tools_synced += tools_synced
 
-            print(f"✅ [FAM Tool Sync] Synced {tools_synced} tools (total: {self._total_tools_synced})")
+            print(f"[ACTIVITY] ✓ Synced {tools_synced} tools to FAM")
+            print(f"[ACTIVITY]   Total tools synced: {self._total_tools_synced}")
             self.logger.info(f"Synced {tools_synced} tools to FAM (total: {self._total_tools_synced})")
+            print(f"[ACTIVITY] Sync Tools - Complete")
+            print(f"{'='*70}\n")
 
         except Exception as e:
+            print(f"[ACTIVITY] ✗ Tool sync failed: {e}")
             error_msg = f"Failed to sync tools: {e}"
-            print(f"❌ [FAM Tool Sync] {error_msg}")
             self.logger.error(error_msg, exc_info=True)
+            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _query_and_sync_tools(self) -> int:
@@ -103,84 +164,112 @@ class SyncToolsActivity(AbstractScheduledActivity):
         Raises:
             Exception: If query or sync fails
         """
+        print(f"[ACTION] Querying database for tools...")
         with SessionLocal() as db:
-            tools = db.query(Tool).all()
+            # Eager load the servers relationship to avoid N+1 queries
+            tools = db.query(Tool).options(joinedload(Tool.servers)).all()
             servers = db.query(Server).all()
+            print(f"[ACTION]   Found {len(tools)} tools and {len(servers)} servers in database")
 
             if not tools:
+                print(f"[ACTION] No tools to sync")
                 self.logger.debug("No tools to sync")
                 return 0
 
-            # Get server ID mapping from orchestrator (ContextForge ID -> FAM ID)
-            server_id_mapping = {}
+            # Get set of registered servers from orchestrator
+            registered_servers = set()
             if self._orchestrator:
-                server_id_mapping = self._orchestrator.get_server_id_mapping()
+                registered_servers = self._orchestrator.get_registered_servers()
+                print(f"[ACTION] Found {len(registered_servers)} registered servers in FAM")
 
-            # Build tool-to-server mapping
-            tool_to_server = self._build_tool_server_mapping(servers, server_id_mapping)
+            # Build tool-to-server mapping (only for registered servers)
+            tool_to_server = self._build_tool_server_mapping(servers, registered_servers)
 
-            # Group tools by server and operation type
+            # Detect changes and group by server and operation
+            print(f"[ACTION] Detecting changes using hash-based comparison...")
             tools_by_server = self._group_tools_by_server_and_operation(tools, tool_to_server)
 
+            # Process bulk operations per server
             total_synced = 0
-
-            # Process each server's tools in bulk
             for server_id, operations in tools_by_server.items():
-                # Bulk delete
-                if operations["delete"]:
-                    job_id = await self._fam_client.bulk_delete_tools(operations["delete"], server_id)
-                    if job_id:
-                        for tool_id in operations["delete"]:
-                            self._state_tracker.mark_deleted(tool_id)
-                        total_synced += len(operations["delete"])
-                        self.logger.info(f"Bulk deleted {len(operations['delete'])} tools " f"(server: {server_id}, job: {job_id})")
-
-                # Bulk create
+                # Check if server is registered to FAM
+                if server_id not in registered_servers:
+                    print(f"[ACTION] ⏸ Skipping tools for server {server_id} - server not yet registered to FAM")
+                    continue
+                
+                print(f"[ACTION] Processing tools for server {server_id}...")
+                
+                # Bulk create new tools
                 if operations["create"]:
+                    print(f"[ACTION]   {len(operations['create'])} NEW tools to create")
+                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/create")
                     job_id = await self._fam_client.bulk_create_tools(operations["create"], server_id)
                     if job_id:
+                        print(f"[ACTION] ✓ Bulk create job submitted: {job_id}")
+                        # Mark all as synced
                         for tool in operations["create"]:
                             tool_id = str(tool.id)
                             current_hash = self._state_tracker.compute_hash(tool)
                             self._state_tracker.mark_synced(tool_id, current_hash)
                         total_synced += len(operations["create"])
-                        self.logger.info(f"Bulk created {len(operations['create'])} tools " f"(server: {server_id}, job: {job_id})")
+                    else:
+                        print(f"[ACTION] ✗ Bulk create failed")
 
-                # Bulk update
+                # Bulk update changed tools
                 if operations["update"]:
+                    print(f"[ACTION]   {len(operations['update'])} CHANGED tools to update")
+                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/update")
                     job_id = await self._fam_client.bulk_update_tools(operations["update"], server_id)
                     if job_id:
+                        print(f"[ACTION] ✓ Bulk update job submitted: {job_id}")
+                        # Mark all as synced
                         for tool in operations["update"]:
                             tool_id = str(tool.id)
                             current_hash = self._state_tracker.compute_hash(tool)
                             self._state_tracker.mark_synced(tool_id, current_hash)
                         total_synced += len(operations["update"])
-                        self.logger.info(f"Bulk updated {len(operations['update'])} tools " f"(server: {server_id}, job: {job_id})")
+                    else:
+                        print(f"[ACTION] ✗ Bulk update failed")
 
+                # Bulk delete removed tools
+                if operations["delete"]:
+                    print(f"[ACTION]   {len(operations['delete'])} tools to delete")
+                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/delete")
+                    job_id = await self._fam_client.bulk_delete_tools(operations["delete"], server_id)
+                    if job_id:
+                        print(f"[ACTION] ✓ Bulk delete job submitted: {job_id}")
+                        # Mark all as deleted
+                        for tool_id in operations["delete"]:
+                            self._state_tracker.mark_deleted(tool_id)
+                        total_synced += len(operations["delete"])
+                    else:
+                        print(f"[ACTION] ✗ Bulk delete failed")
+
+            print(f"[ACTION] ✓ Tool sync processing complete ({total_synced} tools synced)")
+            self.logger.info(f"Synced {total_synced} tools to FAM using bulk operations")
             return total_synced
 
-    def _build_tool_server_mapping(self, servers: List[Any], server_id_mapping: Dict[str, str]) -> Dict[str, str]:
-        """Build mapping from tool ID to FAM server ID.
+    def _build_tool_server_mapping(self, servers: List[Any], registered_servers: Set[str]) -> Dict[str, str]:
+        """Build mapping from tool ID to server ID.
 
         Args:
             servers: List of Server ORM objects
-            server_id_mapping: Mapping from ContextForge server ID to FAM server ID
+            registered_servers: Set of server IDs that have been synced to FAM
 
         Returns:
-            Dict mapping tool_id to FAM server_id
+            Dict mapping tool_id to server_id (only for registered servers)
         """
         tool_to_server = {}
         for server in servers:
-            contextforge_server_id = str(server.id)
-            fam_server_id = server_id_mapping.get(contextforge_server_id)
+            server_id = str(server.id)
 
-            if not fam_server_id:
-                # Server not yet synced to FAM, skip its tools
+            # Skip servers that haven't been synced to FAM yet
+            if server_id not in registered_servers:
                 continue
 
             if hasattr(server, "tools") and server.tools:
                 for tool in server.tools:
-                    tool_to_server[str(tool.id)] = fam_server_id
+                    tool_to_server[str(tool.id)] = server_id
 
         return tool_to_server
 
@@ -223,14 +312,3 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 tools_by_server[server_id]["update"].append(tool)
 
         return dict(tools_by_server)
-
-    def get_sync_stats(self) -> dict:
-        """Get sync statistics.
-
-        Returns:
-            Dictionary with sync stats
-        """
-        return {"total_synced": self._total_tools_synced, "interval_seconds": self._sync_interval, "last_execution": (self.last_execution_time if self.last_execution_time else None)}
-
-
-# Made with Bob

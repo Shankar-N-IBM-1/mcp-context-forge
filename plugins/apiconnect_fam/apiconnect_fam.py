@@ -25,8 +25,7 @@ from mcpgateway.plugins.framework import Plugin, PluginConfig
 from pydantic import BaseModel, Field
 
 from .activity_orchestrator import ActivityOrchestrator
-from .fam_client import FAMAssetCatalogClient
-from .models import ReregistrationReport
+from .fam import FAMAssetCatalogClient
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +92,6 @@ class APIConnectFAMConfig(BaseModel):
 class APIConnectFAMPlugin(Plugin):
     """API Connect FAM integration plugin - syncs servers, tools, and metrics to FAM.
     
-    This plugin uses an activity-based architecture following webMethods Agent SDK patterns:
-    - ActivityOrchestrator: Coordinates all activities
-    - SendHeartbeatActivity: Sends periodic heartbeats
-    - SendMetricsActivity: Syncs metrics data
-    - SyncServersActivity: Syncs server assets
-    - SyncToolsActivity: Syncs tool assets
-    - RecoveryHandler: Automatically recovers missed operations after downtime
-    
     The plugin delegates all sync operations to the orchestrator, which
     manages activity execution, scheduling, statistics, and recovery.
     """
@@ -129,21 +120,10 @@ class APIConnectFAMPlugin(Plugin):
             if not all([self._cfg.fam_base_url, self._cfg.fam_username, self._cfg.fam_password, self._cfg.fam_runtime_id]):
                 error_msg = "FAM sync enabled but required fields missing (base_url, username, password, or runtime_id). Plugin initialization failed."
                 logger.error(error_msg)
-                print(f"\n{'='*80}")
-                print(f"❌ APIConnectFAM: Initialization failed!")
-                print(f"   Error: Missing required FAM configuration")
-                print(f"   Required: fam_base_url, fam_username, fam_password, fam_runtime_id")
-                print(f"{'='*80}\n")
                 raise ValueError(error_msg)
             
             # Store runtime ID
             self._runtime_id = self._cfg.fam_runtime_id
-            
-            print(f"\n{'='*80}")
-            print(f"🔄 APIConnectFAM: Initializing FAM integration...")
-            print(f"   FAM URL: {self._cfg.fam_base_url}")
-            print(f"   Runtime ID: {self._runtime_id}")
-            print(f"{'='*80}\n")
             
             # Create FAM client with runtime ID (type assertions safe due to validation above)
             assert self._cfg.fam_base_url is not None
@@ -159,14 +139,43 @@ class APIConnectFAMPlugin(Plugin):
                 timeout=self._cfg.fam_timeout,
                 verify_ssl=self._cfg.fam_verify_ssl
             )
+            
+            print(f"\n{'#'*80}")
+            print(f"# API Connect FAM Plugin - Initialization")
+            print(f"{'#'*80}")
+            print(f"[PLUGIN] FAM Base URL: {self._cfg.fam_base_url}")
+            print(f"[PLUGIN] Runtime ID: {self._runtime_id}")
+            print(f"[PLUGIN] Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
+            print(f"[PLUGIN] Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
+            print(f"[PLUGIN] Circuit Breaker: Enabled (default)")
+            print(f"{'#'*80}\n")
+            
             logger.info(f"FAM sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
             
+            # Check FAM health before attempting registration
+            print(f"\n[PLUGIN] Checking FAM API health...")
+            logger.info("Performing pre-initialization FAM health check")
+            
+            try:
+                is_healthy = await self._fam_client.check_health()
+                if not is_healthy:
+                    error_msg = "FAM health check failed - API is not responding. Cannot proceed with initialization."
+                    print(f"[PLUGIN] ✗ {error_msg}")
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                print(f"[PLUGIN] ✓ FAM API is healthy and reachable")
+                logger.info("FAM health check passed - proceeding with runtime registration")
+                
+            except Exception as e:
+                error_msg = f"FAM health check failed: {e}"
+                print(f"[PLUGIN] ✗ {error_msg}")
+                logger.error(error_msg, exc_info=True)
+                raise ValueError(error_msg)
+            
             # Register/re-register runtime in FAM
-            print(f"\n{'='*80}")
-            print(f"🔄 APIConnectFAM: Registering runtime in FAM...")
-            print(f"   Runtime ID: {self._runtime_id}")
-            print(f"   Runtime Name: {self._cfg.fam_runtime_name}")
-            print(f"{'='*80}\n")
+            print(f"\n[PLUGIN] Registering runtime with FAM...")
+            logger.info(f"Registering runtime in FAM: {self._runtime_id}")
             
             try:
                 # Register runtime with configuration-based capabilities
@@ -190,49 +199,27 @@ class APIConnectFAMPlugin(Plugin):
                 if not report:
                     error_msg = f"Failed to register runtime {self._runtime_id} in FAM"
                     logger.error(error_msg)
-                    print(f"\n{'='*80}")
-                    print(f"❌ APIConnectFAM: Runtime registration failed!")
-                    print(f"   Error: No report returned from FAM")
-                    print(f"{'='*80}\n")
                     raise ValueError(error_msg)
                 
                 # Determine if this is first-time registration or re-registration
                 is_reregistration = report.is_reregistration()
                 status_text = "re-registered" if is_reregistration else "registered"
                 
-                print(f"\n{'='*80}")
-                print(f"✅ APIConnectFAM: Runtime {status_text} successfully in FAM!")
-                print(f"   Runtime ID: {report.runtime_id}")
-                print(f"   Status Code: {report.status_code} ({'Re-registration' if is_reregistration else 'First-time registration'})")
-                if is_reregistration:
-                    if report.last_heartbeat_time:
-                        print(f"   Last Heartbeat: {report.last_heartbeat_time}")
-                    if report.last_asset_sync_time:
-                        print(f"   Last Asset Sync: {report.last_asset_sync_time}")
-                    if report.last_metrics_time:
-                        print(f"   Last Metrics: {report.last_metrics_time}")
-                print(f"{'='*80}\n")
+                print(f"[PLUGIN] ✓ Runtime {status_text} successfully")
+                print(f"[PLUGIN]   Status Code: {report.status_code}")
+                if report.last_heartbeat_time:
+                    print(f"[PLUGIN]   Last Heartbeat: {report.last_heartbeat_time}")
+                if report.last_metrics_time:
+                    print(f"[PLUGIN]   Last Metrics: {report.last_metrics_time}")
+                if report.last_asset_sync_time:
+                    print(f"[PLUGIN]   Last Asset Sync: {report.last_asset_sync_time}")
+                
                 logger.info(f"Runtime {self._runtime_id} {status_text} in FAM, report: {report.model_dump()}")
                 
             except Exception as e:
                 error_msg = f"Failed to register runtime: {e}"
                 logger.error(error_msg, exc_info=True)
-                print(f"\n{'='*80}")
-                print(f"❌ APIConnectFAM: Runtime registration failed!")
-                print(f"   Error: {e}")
-                print(f"{'='*80}\n")
                 raise ValueError(error_msg)
-            
-            print(f"\n{'='*80}")
-            print(f"🚀 APIConnectFAM: Starting activity orchestrator...")
-            print(f"   Heartbeat: Every {self._cfg.fam_runtime_heartbeat_interval_seconds}s (mandatory)")
-            print(f"   Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
-            if self._cfg.fam_asset_sync_enabled:
-                print(f"   Asset Sync Interval: Every {self._cfg.fam_asset_sync_interval}s")
-            print(f"   Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
-            if self._cfg.metrics_sync_enabled:
-                print(f"   Metrics Sync Interval: Every {self._cfg.metrics_sync_interval}s")
-            print(f"{'='*80}\n")
             
             # Initialize activity orchestrator
             self._orchestrator = ActivityOrchestrator(
@@ -246,29 +233,33 @@ class APIConnectFAMPlugin(Plugin):
                 tool_sync_interval=self._cfg.fam_asset_sync_interval if self._cfg.fam_asset_sync_enabled else 0
             )
             
+            # Mark runtime as registered (enables server and tool sync)
+            self._orchestrator.mark_runtime_registered()
+            print(f"[PLUGIN] ✓ Runtime registration complete - server and tool sync enabled")
+            logger.info("Runtime registration complete - server and tool sync enabled")
+            
             # Start orchestrator
+            print(f"\n[PLUGIN] Starting activity orchestrator...")
             await self._orchestrator.start()
+            print(f"[PLUGIN] ✓ Activity orchestrator started")
             logger.info("Activity orchestrator started")
-            print(f"✅ APIConnectFAM: Activity orchestrator started successfully\n")
             
             # Trigger recovery asynchronously only if this is a re-registration (status 200)
             if report and report.is_reregistration():
                 status_msg = "status 200" if report.status_code == 200 else f"status {report.status_code} (conflict)"
-                print(f"\n{'='*80}")
-                print(f"🔄 APIConnectFAM: Re-registration detected ({status_msg}), triggering recovery...")
-                print(f"   Last Heartbeat: {report.last_heartbeat_time or 'Never'}")
-                print(f"   Last Asset Sync: {report.last_asset_sync_time or 'Never'}")
-                print(f"   Last Metrics: {report.last_metrics_time or 'Never'}")
-                print(f"{'='*80}\n")
+                print(f"\n[PLUGIN] Re-registration detected ({status_msg})")
+                print(f"[PLUGIN] Scheduling recovery of missed operations...")
                 logger.info(f"Re-registration detected ({status_msg}) - scheduling recovery of missed operations...")
                 
                 # Schedule recovery to run asynchronously (don't block initialization)
                 asyncio.create_task(self._trigger_recovery_async())
             else:
-                print(f"\n{'='*80}")
-                print(f"✅ APIConnectFAM: First-time registration (status 201), no recovery needed")
-                print(f"{'='*80}\n")
+                print(f"\n[PLUGIN] First-time registration - no recovery needed")
                 logger.info("First-time registration (status 201) - no recovery needed")
+            
+            print(f"\n{'#'*80}")
+            print(f"# API Connect FAM Plugin - Ready")
+            print(f"{'#'*80}\n")
 
     async def _trigger_recovery_async(self) -> None:
         """Trigger recovery of missed operations asynchronously.
@@ -279,14 +270,8 @@ class APIConnectFAMPlugin(Plugin):
         try:
             if self._orchestrator:
                 await self._orchestrator.trigger_recovery()
-                print(f"\n{'='*80}")
-                print(f"✅ APIConnectFAM: Recovery completed successfully")
-                print(f"{'='*80}\n")
                 logger.info("Recovery completed successfully")
         except Exception as e:
-            print(f"\n{'='*80}")
-            print(f"❌ APIConnectFAM: Recovery failed: {e}")
-            print(f"{'='*80}\n")
             logger.error(f"Error during recovery: {e}", exc_info=True)
 
     async def shutdown(self) -> None:

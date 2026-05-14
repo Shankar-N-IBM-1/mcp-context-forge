@@ -1,9 +1,7 @@
 """Base Activity Classes.
 
-Defines abstract base classes for all activities, following webMethods Agent SDK pattern.
+Defines abstract base classes for all activities.
 
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
@@ -13,20 +11,19 @@ import time
 from typing import Optional
 
 # Local
-from ..models import ActivityContext, ActivityStatistics
+from ..models import ActivityContext
 
 
 class AbstractActivity(ABC):
     """Base class for all activities.
 
-    Following webMethods SDK pattern, activities represent discrete operations
+    Activities represent discrete operations
     that can be executed independently. Each activity has access to shared
-    context and tracks its own execution statistics.
+    context.
 
     Attributes:
         context: Shared activity context
         logger: Logger for this activity
-        stats: Execution statistics
     """
 
     def __init__(self, context: ActivityContext):
@@ -37,7 +34,6 @@ class AbstractActivity(ABC):
         """
         self.context = context
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        self.stats = ActivityStatistics(activity_name=self.__class__.__name__)
 
     @abstractmethod
     async def perform(self) -> None:
@@ -52,16 +48,14 @@ class AbstractActivity(ABC):
         pass
 
     async def execute(self) -> bool:
-        """Execute activity with statistics tracking.
+        """Execute activity with error handling.
 
-        Wraps the perform() method with timing and error handling.
+        Wraps the perform() method with error handling.
 
         Returns:
             True if execution succeeded, False otherwise
         """
-        start_time = time.time()
         success = False
-        error_msg: Optional[str] = None
 
         try:
             self.logger.debug(f"Executing {self.__class__.__name__}")
@@ -70,23 +64,9 @@ class AbstractActivity(ABC):
             self.logger.debug(f"{self.__class__.__name__} completed successfully")
 
         except Exception as e:
-            error_msg = str(e)
             self.logger.error(f"{self.__class__.__name__} failed: {e}", exc_info=True)
 
-        finally:
-            # Record execution statistics
-            duration_ms = (time.time() - start_time) * 1000
-            self.stats.record_execution(success=success, duration_ms=duration_ms, error=error_msg)
-
         return success
-
-    def get_statistics(self) -> ActivityStatistics:
-        """Get execution statistics for this activity.
-
-        Returns:
-            Activity statistics
-        """
-        return self.stats
 
 
 class AbstractScheduledActivity(AbstractActivity):
@@ -97,8 +77,6 @@ class AbstractScheduledActivity(AbstractActivity):
 
     Attributes:
         context: Shared activity context
-        logger: Logger for this activity
-        stats: Execution statistics
         last_execution_time: Timestamp of last execution
     """
 
@@ -149,6 +127,3 @@ class AbstractScheduledActivity(AbstractActivity):
         self.last_execution_time = time.time()
 
         return success
-
-
-# Made with Bob

@@ -1,39 +1,72 @@
 """Sync Servers Activity.
 
 Syncs MCP servers to FAM Asset Catalog.
-Follows webMethods Agent SDK SyncAssetsActivity pattern.
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 # First-Party
 from mcpgateway.db import Server, SessionLocal
 
 # Local
-from ..fam_client import FAMAssetCatalogClient
+from ..fam import FAMAssetCatalogClient
 from ..models import ActivityContext
 from ..utils import RetryConfig, SyncError, with_retry
 from .base import AbstractScheduledActivity
+from .state_tracker import AbstractStateTracker
 
 if TYPE_CHECKING:
     # Local
     from ..activity_orchestrator import ActivityOrchestrator
 
 
+class ServerStateTracker(AbstractStateTracker):
+    """Tracks server state for change detection using content hashing.
+    
+    Since server payloads now include both 'id' and 'mcpServerId' with the same value,
+    we only need to track content hashes. Server presence in cache = synced to FAM.
+    
+    Extends AbstractStateTracker with server-specific hash computation.
+    """
+    
+    @staticmethod
+    def compute_hash(entity: Any) -> str:
+        """Compute SHA-256 hash of server content.
+        
+        Includes: name, description, enabled, url
+        
+        Args:
+            entity: ContextForge Server ORM object
+            
+        Returns:
+            SHA-256 hash string
+        """
+        server_data = {
+            "name": entity.name,
+            "description": entity.description,
+            "enabled": entity.enabled,
+            "url": entity.url if hasattr(entity, 'url') else None,
+        }
+        return AbstractStateTracker._compute_hash_from_dict(server_data)
+    
+    def is_new_server(self, server_id: str) -> bool:
+        """Check if server is new (not yet synced to FAM).
+        
+        Convenience method that delegates to base class is_new().
+        
+        Args:
+            server_id: Server identifier
+            
+        Returns:
+            True if server is new (no hash in cache)
+        """
+        return self.is_new(server_id)
+
+
 class SyncServersActivity(AbstractScheduledActivity):
     """Activity for syncing MCP servers to FAM.
 
-    Following webMethods SDK pattern, this activity:
-    1. Queries servers from database
-    2. Detects changes via hash comparison
-    3. Syncs CREATE/UPDATE/DELETE to FAM
-    4. Updates server ID mapping in orchestrator (for tool sync)
-    5. Updates timestamp storage
-    6. Tracks statistics
 
     IMPORTANT: This activity must complete before SyncToolsActivity runs,
     because tools need the FAM server ID as mcpServerId.
@@ -58,6 +91,7 @@ class SyncServersActivity(AbstractScheduledActivity):
         self._fam_client = fam_client
         self._sync_interval = sync_interval
         self._orchestrator = orchestrator
+        self._state_tracker = ServerStateTracker()
         self._total_servers_synced = 0
 
     def get_interval_seconds(self) -> int:
@@ -74,22 +108,29 @@ class SyncServersActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If sync fails
         """
+        print(f"\n{'='*70}")
+        print(f"[ACTIVITY] Sync Servers - Starting")
+        print(f"{'='*70}")
+        
         try:
-            print(f"🔄 [FAM Server Sync] Syncing servers to FAM...")
-            
             # Query and sync servers
+            print(f"[ACTIVITY] Querying servers from database...")
             servers_synced = await with_retry(self._query_and_sync_servers, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Sync Servers")
 
             # Track success
             self._total_servers_synced += servers_synced
 
-            print(f"✅ [FAM Server Sync] Synced {servers_synced} servers (total: {self._total_servers_synced})")
+            print(f"[ACTIVITY] ✓ Synced {servers_synced} servers to FAM")
+            print(f"[ACTIVITY]   Total servers synced: {self._total_servers_synced}")
             self.logger.info(f"Synced {servers_synced} servers to FAM (total: {self._total_servers_synced})")
+            print(f"[ACTIVITY] Sync Servers - Complete")
+            print(f"{'='*70}\n")
 
         except Exception as e:
+            print(f"[ACTIVITY] ✗ Server sync failed: {e}")
             error_msg = f"Failed to sync servers: {e}"
-            print(f"❌ [FAM Server Sync] {error_msg}")
             self.logger.error(error_msg, exc_info=True)
+            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _query_and_sync_servers(self) -> int:
@@ -101,29 +142,60 @@ class SyncServersActivity(AbstractScheduledActivity):
         Raises:
             Exception: If query or sync fails
         """
+        print(f"[ACTION] Querying database for servers...")
         with SessionLocal() as db:
             servers = db.query(Server).all()
+            print(f"[ACTION]   Found {len(servers)} servers in database")
 
             if not servers:
+                print(f"[ACTION] No servers to sync")
                 self.logger.debug("No servers to sync")
                 return 0
 
-            # TODO: Implement actual sync logic
-            # This would use the logic from server_sync.py:
-            # 1. Calculate hash for each server
-            # 2. Compare with FAM state
-            # 3. Send CREATE/UPDATE/DELETE operations
+            print(f"[ACTION] Processing {len(servers)} servers for sync...")
+            
+            synced_count = 0
+            for server in servers:
+                try:
+                    server_id = str(server.id)
+                    
+                    # Compute hash for change detection
+                    current_hash = self._state_tracker.compute_hash(server)
+                    
+                    # Check if server needs syncing
+                    is_new = self._state_tracker.is_new_server(server_id)
+                    has_changed = self._state_tracker.has_changed(server_id, current_hash)
+                    
+                    if is_new:
+                        print(f"[ACTION] Server {server_id} is NEW, syncing...")
+                    elif has_changed:
+                        print(f"[ACTION] Server {server_id} has CHANGED, syncing...")
+                    else:
+                        print(f"[ACTION] Server {server_id} unchanged, skipping")
+                        continue
+                    
+                    # Try to create server in FAM
+                    print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers")
+                    print(f"[ACTION]   Server ID: {server.id}, Name: {server.name}")
+                    
+                    success = await self._fam_client.create_server(server)
+                    
+                    if success:
+                        print(f"[ACTION] ✓ Server created/updated in FAM: {server.id}")
+                        # Mark as synced in state tracker
+                        self._state_tracker.mark_synced(server_id, current_hash)
+                        synced_count += 1
+                        
+                        # Mark server as synced in orchestrator (for tool sync dependency)
+                        if self._orchestrator:
+                            self._orchestrator.mark_server_synced(server_id)
+                    else:
+                        print(f"[ACTION] ✗ Failed to sync server: {server.id}")
+                        
+                except Exception as e:
+                    print(f"[ACTION] ✗ Error syncing server {server.id}: {e}")
+                    self.logger.error(f"Error syncing server {server.id}: {e}", exc_info=True)
 
-            self.logger.info(f"Found {len(servers)} servers to sync")
-            return len(servers)
-
-    def get_sync_stats(self) -> dict:
-        """Get sync statistics.
-
-        Returns:
-            Dictionary with sync stats
-        """
-        return {"total_synced": self._total_servers_synced, "interval_seconds": self._sync_interval, "last_execution": (self.last_execution_time if self.last_execution_time else None)}
-
-
-# Made with Bob
+            print(f"[ACTION] ✓ Server sync processing complete ({synced_count}/{len(servers)} synced)")
+            self.logger.info(f"Synced {synced_count} servers to FAM")
+            return synced_count

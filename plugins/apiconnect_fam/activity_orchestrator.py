@@ -1,10 +1,6 @@
 """Activity Orchestrator for Server Monitor Plugin.
 
-Manages all activities following webMethods Agent SDK patterns.
 Coordinates activity execution, statistics tracking, and health monitoring.
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
@@ -14,15 +10,13 @@ from typing import Any, Dict, List, Optional
 
 # Local
 from .activities.base import AbstractScheduledActivity
-from .activities.check_fam_health import CheckFAMHealthActivity
-from .activities.check_runtime_health import CheckRuntimeHealthActivity
 from .activities.send_heartbeat import SendHeartbeatActivity
 from .activities.send_metrics import SendMetricsActivity
 from .activities.sync_servers import SyncServersActivity
 from .activities.sync_tools import SyncToolsActivity
-from .fam_client import FAMAssetCatalogClient
+from .fam import FAMAssetCatalogClient
 from .handlers.recovery_handler import RecoveryHandler
-from .models import ActivityContext, SyncStatistics
+from .models import ActivityContext
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +46,6 @@ class ActivityOrchestrator:
         metrics_interval: int = 300,
         server_sync_interval: int = 60,
         tool_sync_interval: int = 60,
-        fam_health_check_interval: int = 30,
-        runtime_health_check_interval: int = 60,
     ):
         """Initialize the activity orchestrator.
 
@@ -66,8 +58,6 @@ class ActivityOrchestrator:
             metrics_interval: Metrics sync interval in seconds (default: 300, 0 to disable)
             server_sync_interval: Server sync interval in seconds (default: 60, 0 to disable)
             tool_sync_interval: Tool sync interval in seconds (default: 60, 0 to disable)
-            fam_health_check_interval: FAM health check interval in seconds (default: 30)
-            runtime_health_check_interval: Runtime health check interval in seconds (default: 60)
         """
         # Create shared context
         self.context = ActivityContext(runtime_id=runtime_id, fam_base_url=fam_base_url, config=config)
@@ -81,13 +71,6 @@ class ActivityOrchestrator:
         # Initialize activities
         # Note: Order matters! Servers must sync before tools
         self.activities: List[AbstractScheduledActivity] = []
-
-        # Create health check activities (independent, run first for monitoring)
-        self.fam_health_activity = CheckFAMHealthActivity(context=self.context, fam_client=fam_client, check_interval=fam_health_check_interval)
-        self.activities.append(self.fam_health_activity)
-
-        self.runtime_health_activity = CheckRuntimeHealthActivity(context=self.context, check_interval=runtime_health_check_interval)
-        self.activities.append(self.runtime_health_activity)
 
         # Create heartbeat activity (mandatory)
         self.heartbeat_activity = SendHeartbeatActivity(context=self.context, fam_client=fam_client, heartbeat_interval=heartbeat_interval)
@@ -122,44 +105,65 @@ class ActivityOrchestrator:
 
         # Track if servers have been synced (for tool sync dependency)
         self._servers_synced_this_cycle = False
+        
+        # Track if runtime has been registered to FAM
+        # Server and tool sync should only happen AFTER runtime registration
+        self._runtime_registered = False
 
         # Orchestrator state
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
         # Shared state for activity coordination
-        # Maps ContextForge server ID -> FAM server ID
-        self._server_id_mapping: Dict[str, str] = {}
+        # Track which servers have been registered to FAM
+        # Set of server IDs that have been successfully synced to FAM
+        self._registered_servers: set[str] = set()
 
         logger.info(
             f"ActivityOrchestrator initialized with {len(self.activities)} activities: "
-            f"fam_health={fam_health_check_interval}s, runtime_health={runtime_health_check_interval}s, "
             f"heartbeat={heartbeat_interval}s, metrics={metrics_interval if metrics_interval > 0 else 'disabled'}s, "
             f"servers={server_sync_interval if server_sync_interval > 0 else 'disabled'}s, "
             f"tools={tool_sync_interval if tool_sync_interval > 0 else 'disabled'}s"
         )
 
-    def get_server_id_mapping(self) -> Dict[str, str]:
-        """Get the mapping of ContextForge server IDs to FAM server IDs.
+    def mark_server_synced(self, server_id: str) -> None:
+        """Mark a server as synced to FAM.
 
-        This is used by tool sync to get the mcpServerId for each tool.
-
-        Returns:
-            Dictionary mapping ContextForge server ID to FAM server ID
-        """
-        return self._server_id_mapping.copy()
-
-    def update_server_id_mapping(self, contextforge_id: str, fam_id: str) -> None:
-        """Update the server ID mapping.
-
-        Called by server sync activity when a server is synced to FAM.
+        Called by server sync activity when a server is successfully synced to FAM.
 
         Args:
-            contextforge_id: ContextForge server ID
-            fam_id: FAM server ID
+            server_id: ContextForge server ID
         """
-        self._server_id_mapping[contextforge_id] = fam_id
-        logger.debug(f"Updated server ID mapping: {contextforge_id} -> {fam_id}")
+        self._registered_servers.add(server_id)
+        logger.debug(f"Server {server_id} marked as synced to FAM")
+    
+    def is_server_registered(self, server_id: str) -> bool:
+        """Check if a server has been registered to FAM.
+        
+        Args:
+            server_id: ContextForge server ID
+            
+        Returns:
+            True if server has been synced to FAM
+        """
+        return server_id in self._registered_servers
+    
+    def get_registered_servers(self) -> set[str]:
+        """Get set of all registered server IDs.
+        
+        Returns:
+            Set of ContextForge server IDs that have been registered to FAM
+        """
+        return self._registered_servers.copy()
+    
+    def mark_runtime_registered(self) -> None:
+        """Mark runtime as registered to FAM.
+        
+        Called after successful runtime registration.
+        Enables server and tool sync activities.
+        """
+        self._runtime_registered = True
+        logger.info("Runtime marked as registered - server and tool sync now enabled")
 
     async def start(self) -> None:
         """Start the orchestrator and begin activity execution."""
@@ -207,8 +211,17 @@ class ActivityOrchestrator:
                 # Execute activities in dependency order
                 for activity in self.activities:
                     if activity.should_execute():
-                        # Special handling for tool sync - must wait for server sync
+                        # Special handling for server sync - must wait for runtime registration
+                        if activity == self.server_sync_activity:
+                            if not self._runtime_registered:
+                                logger.debug("Skipping server sync - waiting for runtime registration to complete first")
+                                continue
+                        
+                        # Special handling for tool sync - must wait for runtime registration AND server sync
                         if activity == self.tool_sync_activity:
+                            if not self._runtime_registered:
+                                logger.debug("Skipping tool sync - waiting for runtime registration to complete first")
+                                continue
                             if not self._servers_synced_this_cycle:
                                 logger.debug("Skipping tool sync - waiting for server sync to complete first")
                                 continue
@@ -247,50 +260,16 @@ class ActivityOrchestrator:
         except Exception as e:
             logger.error(f"Error during recovery: {e}", exc_info=True)
 
-    def get_statistics(self) -> SyncStatistics:
-        """Get aggregated statistics from all activities.
-
-        Returns:
-            SyncStatistics with aggregated metrics from all activities
-        """
-        stats = SyncStatistics(runtime_id=self.runtime_id)
-
-        # Aggregate activity statistics
-        for activity in self.activities:
-            activity_stats = activity.get_statistics()
-            stats.activities[activity.__class__.__name__] = activity_stats
-
-        # Get specific counts from activities (handle optional activities)
-        stats.total_heartbeats_sent = self.heartbeat_activity.get_heartbeat_stats().get("total_sent", 0)
-        stats.total_metrics_sent = self.metrics_activity.get_metrics_stats().get("total_sent", 0) if self.metrics_activity else 0
-        stats.total_servers_synced = self.server_sync_activity.get_sync_stats().get("total_synced", 0) if self.server_sync_activity else 0
-        stats.total_tools_synced = self.tool_sync_activity.get_sync_stats().get("total_synced", 0) if self.tool_sync_activity else 0
-
-        return stats
-
-    def get_activity_statistics(self) -> Dict[str, Dict[str, Any]]:
-        """Get individual statistics for each activity.
-
-        Returns:
-            Dictionary mapping activity names to their statistics
-        """
-        return {activity.__class__.__name__: activity.get_statistics().model_dump() for activity in self.activities}
-
     def get_health_status(self) -> Dict[str, Any]:
         """Get health status of the orchestrator and all activities.
 
         Returns:
             Dictionary with health status information
         """
-        stats = self.get_statistics()
-        activity_stats = self.get_activity_statistics()
-
         status: Dict[str, Any] = {
             "running": self._running,
+            "runtime_id": self.runtime_id,
             "total_activities": len(self.activities),
-            "overall_statistics": stats.to_dict(),
-            "activity_statistics": activity_stats,
-            "health_checks": {"fam": self.fam_health_activity.get_health_stats(), "runtime": self.runtime_health_activity.get_health_stats()},
             "heartbeat_status": self.heartbeat_activity.get_heartbeat_stats(),
         }
 

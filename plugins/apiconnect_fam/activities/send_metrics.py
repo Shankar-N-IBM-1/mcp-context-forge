@@ -1,10 +1,6 @@
 """Send Metrics Activity.
 
 Sends runtime metrics to FAM periodically.
-Follows webMethods Agent SDK SendMetricsActivity pattern.
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
@@ -16,7 +12,7 @@ from typing import Any, Dict, List
 from mcpgateway.db import Server, ServerMetric, SessionLocal, Tool, ToolMetric
 
 # Local
-from ..fam_client import FAMAssetCatalogClient, FAMMetricsPayload
+from ..fam import FAMAssetCatalogClient, FAMMetricsPayload
 from ..models import ActivityContext
 from ..utils import RetryConfig, SyncError, with_retry
 from .base import AbstractScheduledActivity
@@ -24,12 +20,6 @@ from .base import AbstractScheduledActivity
 
 class SendMetricsActivity(AbstractScheduledActivity):
     """Activity for sending runtime metrics to FAM.
-
-    Following webMethods SDK pattern, this activity:
-    1. Queries metrics from database
-    2. Aggregates by server and tool
-    3. Sends to FAM at configured interval
-    4. Tracks statistics
 
     Attributes:
         context: Shared activity context
@@ -64,22 +54,29 @@ class SendMetricsActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If metrics sync fails
         """
+        print(f"\n{'='*70}")
+        print(f"[ACTIVITY] Send Metrics - Starting")
+        print(f"{'='*70}")
+        
         try:
-            print(f"🔄 [FAM Metrics] Sending metrics to FAM...")
-            
             # Query and send metrics
+            print(f"[ACTIVITY] Querying metrics from database...")
             metrics_count = await with_retry(self._query_and_send_metrics, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Send Metrics")
 
             # Track success
             self._total_metrics_sent += metrics_count
 
-            print(f"✅ [FAM Metrics] Sent {metrics_count} metrics (total: {self._total_metrics_sent})")
+            print(f"[ACTIVITY] ✓ Sent {metrics_count} metrics to FAM")
+            print(f"[ACTIVITY]   Total metrics sent: {self._total_metrics_sent}")
             self.logger.info(f"Sent {metrics_count} metrics to FAM (total: {self._total_metrics_sent})")
+            print(f"[ACTIVITY] Send Metrics - Complete")
+            print(f"{'='*70}\n")
 
         except Exception as e:
+            print(f"[ACTIVITY] ✗ Metrics send failed: {e}")
             error_msg = f"Failed to send metrics: {e}"
-            print(f"❌ [FAM Metrics] {error_msg}")
             self.logger.error(error_msg, exc_info=True)
+            print(f"{'='*70}\n")
             raise SyncError(error_msg, e)
 
     async def _query_and_send_metrics(self) -> int:
@@ -91,6 +88,7 @@ class SendMetricsActivity(AbstractScheduledActivity):
         Raises:
             Exception: If query or send fails
         """
+        print(f"[ACTION] Querying database for metrics...")
         with SessionLocal() as db:
             # Get all servers and tools
             servers = db.query(Server).all()
@@ -104,22 +102,35 @@ class SendMetricsActivity(AbstractScheduledActivity):
 
             tool_metrics_raw = db.query(ToolMetric).filter(ToolMetric.timestamp >= time_window_start).all()
 
+            total_metrics = len(server_metrics_raw) + len(tool_metrics_raw)
+            print(f"[ACTION]   Found {total_metrics} metrics (servers: {len(server_metrics_raw)}, tools: {len(tool_metrics_raw)})")
+
             # Organize metrics
             server_metrics_map = self._organize_server_metrics(server_metrics_raw)
             tool_metrics_by_server = self._organize_tool_metrics(tool_metrics_raw, servers)
 
-            # Build and send metrics payload
-            if server_metrics_map or tool_metrics_by_server:
-                payload = FAMMetricsPayload(
-                    runtime_id=self.context.runtime_id, server_metrics_map=dict(server_metrics_map), tool_metrics_by_server={k: dict(v) for k, v in tool_metrics_by_server.items()}
-                )
+            # Build and send metrics payload (always send, even if empty)
+            print(f"[ACTION] Calling FAM API: POST /api/engine/v3/runtimes/.../metrics")
+            if total_metrics == 0:
+                print(f"[ACTION]   Sending empty metrics payload (no metrics in time window)")
+            
+            # Build payload using FAMMetricsPayload builder
+            payload = FAMMetricsPayload.build_payload(
+                timestamp=datetime.now(timezone.utc),
+                server_metrics_map=dict(server_metrics_map),
+                tool_metrics_by_server={k: dict(v) for k, v in tool_metrics_by_server.items()}
+            )
 
-                await self._fam_client.submit_metrics(payload)
+            success = await self._fam_client.submit_metrics(payload)
 
-                total_metrics = len(server_metrics_raw) + len(tool_metrics_raw)
+            if success:
+                if total_metrics > 0:
+                    print(f"[ACTION] ✓ FAM API call successful ({total_metrics} metrics sent)")
+                else:
+                    print(f"[ACTION] ✓ FAM API call successful (empty metrics payload sent)")
                 return total_metrics
             else:
-                self.logger.debug("No metrics to send")
+                print(f"[ACTION] ✗ FAM API call failed")
                 return 0
 
     def _organize_server_metrics(self, metrics: List[Any]) -> Dict[str, List[Any]]:
@@ -162,14 +173,3 @@ class SendMetricsActivity(AbstractScheduledActivity):
                 tool_metrics_by_server[server_id][tool_id].append(metric)
 
         return tool_metrics_by_server
-
-    def get_metrics_stats(self) -> Dict[str, Any]:
-        """Get metrics statistics.
-
-        Returns:
-            Dictionary with metrics stats
-        """
-        return {"total_sent": self._total_metrics_sent, "interval_seconds": self._metrics_interval, "last_execution": (self.last_execution_time if self.last_execution_time else None)}
-
-
-# Made with Bob

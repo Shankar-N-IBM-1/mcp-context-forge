@@ -1,17 +1,14 @@
 """Register Runtime Activity.
 
 Handles runtime registration with FAM and triggers recovery if needed.
-Follows webMethods Agent SDK RegisterRuntimeActivity pattern.
 
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
 from typing import Optional
 
 # Local
-from ..fam_client import FAMAssetCatalogClient
+from ..fam import FAMAssetCatalogClient
 from ..handlers import RecoveryHandler
 from ..models import ActivityContext, ReregistrationReport
 from ..utils import RegistrationError, RetryConfig, with_retry
@@ -20,12 +17,6 @@ from .base import AbstractActivity
 
 class RegisterRuntimeActivity(AbstractActivity):
     """Activity for registering runtime with FAM.
-
-    Following webMethods SDK pattern, this activity:
-    1. Registers runtime with FAM
-    2. Receives re-registration report with last sync times
-    3. Updates timestamp storage
-    4. Triggers recovery tasks if needed
 
     Attributes:
         context: Shared activity context
@@ -55,40 +46,66 @@ class RegisterRuntimeActivity(AbstractActivity):
         Raises:
             RegistrationError: If registration fails
         """
+        print(f"\n{'='*70}")
+        print(f"[ACTIVITY] Runtime Registration - Starting")
+        print(f"{'='*70}")
+        
         self.logger.info("Registering runtime with FAM")
 
         try:
             # Register runtime with retry logic
-            runtime_id = await with_retry(self._register_runtime, retry_config=RetryConfig(max_attempts=3, initial_delay=2.0), operation_name="Runtime Registration")
+            print(f"[ACTIVITY] Attempting runtime registration with FAM...")
+            report = await with_retry(self._register_runtime, retry_config=RetryConfig(max_attempts=3, initial_delay=2.0), operation_name="Runtime Registration")
 
-            if not runtime_id:
+            if not report or not report.runtime_id:
+                print(f"[ACTIVITY] ✗ Runtime registration failed - no runtime ID returned")
                 raise RegistrationError("Runtime registration returned no runtime ID")
 
-            self._runtime_id = runtime_id
-            self.logger.info(f"Runtime registered successfully with ID: {runtime_id}")
+            self._runtime_id = report.runtime_id
+            print(f"[ACTIVITY] ✓ Runtime registered successfully")
+            print(f"[ACTIVITY]   Runtime ID: {report.runtime_id}")
+            print(f"[ACTIVITY]   Status Code: {report.status_code}")
+            
+            # Check if this is a re-registration (200/409) or first registration (201)
+            if report.status_code in (200, 409):
+                print(f"[ACTIVITY]   Re-registration detected (status {report.status_code})")
+                if any([report.last_heartbeat_time, report.last_metrics_time, report.last_asset_sync_time]):
+                    print(f"[ACTIVITY]   Last heartbeat: {report.last_heartbeat_time}")
+                    print(f"[ACTIVITY]   Last metrics: {report.last_metrics_time}")
+                    print(f"[ACTIVITY]   Last asset sync: {report.last_asset_sync_time}")
+            else:
+                print(f"[ACTIVITY]   First-time registration (status {report.status_code})")
+            
+            self.logger.info(f"Runtime registered successfully with ID: {report.runtime_id}, status: {report.status_code}")
 
             # Update context with runtime ID
-            self.context.runtime_id = runtime_id
-
-            # TODO: Parse re-registration report from response
-            # For now, we'll implement basic registration
-            # In next iteration, FAM client will return ReregistrationReport
+            self.context.runtime_id = report.runtime_id
+            
+            # Handle re-registration report and trigger recovery if needed
+            await self._handle_reregistration_report(report)
+            
+            print(f"[ACTIVITY] Runtime Registration - Complete")
+            print(f"{'='*70}\n")
 
         except Exception as e:
             error_msg = f"Runtime registration failed: {e}"
             self.logger.error(error_msg, exc_info=True)
             raise RegistrationError(error_msg, e)
 
-    async def _register_runtime(self) -> str:
+    async def _register_runtime(self) -> Optional[ReregistrationReport]:
         """Register runtime with FAM.
 
         Returns:
-            Runtime ID
+            ReregistrationReport with runtime ID and sync timestamps, or None if failed
 
         Raises:
             Exception: If registration fails
         """
-        runtime_id = await self._fam_client.register_runtime(
+        print(f"[ACTION] Calling FAM API: POST /api/assetcatalog/v2/runtimes")
+        print(f"[ACTION]   Runtime Name: {self._runtime_config.get('name', 'ContextForge Gateway')}")
+        print(f"[ACTION]   Runtime Type: {self._runtime_config.get('type', 'WEBMETHODS_GATEWAY')}")
+        
+        report = await self._fam_client.register_runtime(
             name=self._runtime_config.get("name", "ContextForge Gateway"),
             description=self._runtime_config.get("description", "ContextForge MCP Gateway Runtime"),
             runtime_type=self._runtime_config.get("type", "WEBMETHODS_GATEWAY"),
@@ -102,7 +119,13 @@ class RegisterRuntimeActivity(AbstractActivity):
             heartbeat_interval=self._runtime_config.get("heartbeat_interval", 6000),
         )
 
-        return runtime_id
+        if report and report.runtime_id:
+            print(f"[ACTION] ✓ FAM API call successful")
+        else:
+            print(f"[ACTION] ✗ FAM API call failed")
+            raise RegistrationError("FAM API returned no report or runtime ID")
+
+        return report
 
     async def _handle_reregistration_report(self, report: ReregistrationReport) -> None:
         """Handle re-registration report and trigger recovery.
@@ -139,6 +162,3 @@ class RegisterRuntimeActivity(AbstractActivity):
             Runtime ID if registration succeeded, None otherwise
         """
         return self._runtime_id
-
-
-# Made with Bob

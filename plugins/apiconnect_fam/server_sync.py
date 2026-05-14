@@ -11,7 +11,8 @@ from typing import Any, List, Set
 
 from mcpgateway.db import Server, SessionLocal
 
-from .fam_client import FAMAssetCatalogClient, ServerStateTracker
+from .activities.sync_servers import ServerStateTracker
+from .fam import FAMAssetCatalogClient
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class ServerSyncTask:
         current_server_ids = {str(server.id) for server in servers}
         
         # Detect and delete servers that no longer exist
-        deleted_ids = self._state_tracker.get_deleted_servers(current_server_ids)
+        deleted_ids = self._state_tracker.get_deleted_entities(current_server_ids)
         for server_id in deleted_ids:
             if await self._fam_client.delete_server(server_id):
                 self._state_tracker.mark_deleted(server_id)
@@ -88,8 +89,6 @@ class ServerSyncTask:
             Dict with sync statistics
         """
         return {
-            "synced_servers": len(self._state_tracker._fam_servers),
-            "cached_hashes": len(self._state_tracker._server_cache)
+            "synced_servers": len(self._state_tracker._cache),
+            "cached_hashes": len(self._state_tracker._cache)
         }
-
-# Made with Bob

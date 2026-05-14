@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 
 from mcpgateway.db import Server, Tool, SessionLocal
 
-from .fam_client import FAMAssetCatalogClient, ToolStateTracker
+from .fam import FAMAssetCatalogClient, ToolStateTracker
 
 logger = logging.getLogger(__name__)
 
