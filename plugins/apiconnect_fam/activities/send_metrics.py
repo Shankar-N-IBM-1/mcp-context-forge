@@ -59,7 +59,7 @@ class SendMetricsActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If metrics sync fails
         """
-        
+
         try:
             # Query and send metrics
             metrics_count = await with_retry(self._query_and_send_metrics, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Send Metrics")
@@ -105,13 +105,11 @@ class SendMetricsActivity(AbstractScheduledActivity):
             # Build and send metrics payload (always send, even if empty)
             if total_metrics == 0:
                 self.logger.debug("Sending empty metrics payload (no metrics in time window)")
-            
+
             # Build payload using FAMMetricsPayload builder
             self.logger.debug(f"Calling FAM API: POST /api/engine/v3/runtimes/.../metrics")
             payload = FAMMetricsPayload.build_payload(
-                timestamp=datetime.now(timezone.utc),
-                server_metrics_map=dict(server_metrics_map),
-                tool_metrics_by_server={k: dict(v) for k, v in tool_metrics_by_server.items()}
+                timestamp=datetime.now(timezone.utc), server_metrics_map=dict(server_metrics_map), tool_metrics_by_server={k: dict(v) for k, v in tool_metrics_by_server.items()}
             )
 
             success = await self._fam_client.submit_metrics(payload)

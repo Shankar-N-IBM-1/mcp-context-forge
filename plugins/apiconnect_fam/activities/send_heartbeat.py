@@ -52,7 +52,7 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If heartbeat fails after retries
         """
-        
+
         try:
             # Send heartbeat with retry logic
             await with_retry(self._send_heartbeat, retry_config=RetryConfig(max_attempts=2, initial_delay=0.5), operation_name="Send Heartbeat")
@@ -77,9 +77,9 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
         """
         self.logger.debug(f"Calling FAM API: POST /api/engine/v2/runtimes/heartbeat")
         self.logger.debug(f"Runtime ID: {self.context.runtime_id}")
-        
+
         success = await self._fam_client.send_heartbeat(self.context.runtime_id)
-        
+
         if success:
             self.logger.debug("FAM API call successful")
         else:

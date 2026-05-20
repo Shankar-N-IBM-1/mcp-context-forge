@@ -28,22 +28,22 @@ if TYPE_CHECKING:
 
 class ServerStateTracker(AbstractStateTracker):
     """Tracks server state for change detection using content hashing.
-    
+
     Since server payloads now include both 'id' and 'mcpServerId' with the same value,
     we only need to track content hashes. Server presence in cache = synced to FAM.
-    
+
     Extends AbstractStateTracker with server-specific hash computation.
     """
-    
+
     @staticmethod
     def compute_hash(entity: Any) -> str:
         """Compute SHA-256 hash of server content.
-        
+
         Includes: name, description, enabled, url
-        
+
         Args:
             entity: ContextForge Server ORM object
-            
+
         Returns:
             SHA-256 hash string
         """
@@ -51,18 +51,18 @@ class ServerStateTracker(AbstractStateTracker):
             "name": entity.name,
             "description": entity.description,
             "enabled": entity.enabled,
-            "url": entity.url if hasattr(entity, 'url') else None,
+            "url": entity.url if hasattr(entity, "url") else None,
         }
         return AbstractStateTracker._compute_hash_from_dict(server_data)
-    
+
     def is_new_server(self, server_id: str) -> bool:
         """Check if server is new (not yet synced to FAM).
-        
+
         Convenience method that delegates to base class is_new().
-        
+
         Args:
             server_id: Server identifier
-            
+
         Returns:
             True if server is new (no hash in cache)
         """
@@ -113,7 +113,7 @@ class SyncServersActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If sync fails
         """
-        
+
         try:
             # Query and sync servers
             servers_synced = await with_retry(self._query_and_sync_servers, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Sync Servers")
@@ -144,19 +144,18 @@ class SyncServersActivity(AbstractScheduledActivity):
                 self.logger.debug("No servers to sync")
                 return 0
 
-            
             synced_count = 0
             for server in servers:
                 try:
                     server_id = str(server.id)
-                    
+
                     # Compute hash for change detection
                     current_hash = self._state_tracker.compute_hash(server)
-                    
+
                     # Check if server needs syncing
                     is_new = self._state_tracker.is_new_server(server_id)
                     has_changed = self._state_tracker.has_changed(server_id, current_hash)
-                    
+
                     if is_new:
                         self.logger.debug(f"Server {server_id} is NEW, syncing...")
                     elif has_changed:
@@ -164,25 +163,25 @@ class SyncServersActivity(AbstractScheduledActivity):
                     else:
                         self.logger.debug(f"Server {server_id} unchanged, skipping")
                         continue
-                    
+
                     # Try to create server in FAM
                     self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers")
                     self.logger.debug(f"Server ID: {server.id}, Name: {server.name}")
-                    
+
                     success = await self._fam_client.create_server(server)
-                    
+
                     if success:
                         self.logger.debug(f"Server created/updated in FAM: {server.id}")
                         # Mark as synced in state tracker
                         self._state_tracker.mark_synced(server_id, current_hash)
                         synced_count += 1
-                        
+
                         # Mark server as synced in orchestrator (for tool sync dependency)
                         if self._orchestrator:
                             self._orchestrator.mark_server_synced(server_id)
                     else:
                         self.logger.warning(f"Failed to sync server: {server.id}")
-                        
+
                 except Exception as e:
                     self.logger.error(f"Error syncing server {server.id}: {e}", exc_info=True)
 

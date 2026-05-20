@@ -15,12 +15,17 @@ Features:
 - Metrics synchronization
 """
 
+# Standard
 import logging
 from typing import List, Optional
 
-from mcpgateway.plugins.framework import Plugin, PluginConfig
+# Third-Party
 from pydantic import BaseModel, Field
 
+# First-Party
+from mcpgateway.plugins.framework import Plugin, PluginConfig
+
+# Local
 from .activity_orchestrator import ActivityOrchestrator
 from .fam import FAMAssetCatalogClient
 
@@ -29,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class APIConnectFAMConfig(BaseModel):
     """Configuration for IBM API Connect Federated API Management plugin.
-    
+
     Attributes:
         interval_seconds: How often to sync servers (in seconds).
         log_details: Whether to log detailed server information.
@@ -71,7 +76,7 @@ class APIConnectFAMConfig(BaseModel):
     fam_asset_sync_interval: int = 60  # Sync assets every 60 seconds
     metrics_sync_enabled: bool = False
     metrics_sync_interval: int = 300  # 5 minutes default
-    
+
     # Runtime metadata (for reference only, not used after initial registration)
     fam_runtime_name: str = "ContextForge Gateway"
     fam_runtime_description: str = "ContextForge MCP Gateway Runtime"
@@ -88,7 +93,7 @@ class APIConnectFAMConfig(BaseModel):
 
 class APIConnectFAMPlugin(Plugin):
     """IBM API Connect Federated API Management integration plugin - syncs servers, tools, and metrics to IBM API Connect Federated API Management.
-    
+
     The plugin delegates all sync operations to the orchestrator, which
     manages activity execution, scheduling, statistics, and recovery.
     """
@@ -101,7 +106,7 @@ class APIConnectFAMPlugin(Plugin):
         """
         super().__init__(config)
         self._cfg = APIConnectFAMConfig(**(config.config or {}))
-        
+
         # FAM client and orchestrator
         self._fam_client: Optional[FAMAssetCatalogClient] = None
         self._orchestrator: Optional[ActivityOrchestrator] = None
@@ -110,7 +115,7 @@ class APIConnectFAMPlugin(Plugin):
     async def initialize(self) -> None:
         """Start the activity orchestrator and HTTP client."""
         logger.info(f"Initializing APIConnectFAMPlugin with interval={self._cfg.interval_seconds}s")
-        
+
         # Initialize IBM API Connect Federated API Management client if sync is enabled
         if self._cfg.fam_enabled:
             # Check if we have all required fields: base URL, username, password, and runtime_id
@@ -118,32 +123,32 @@ class APIConnectFAMPlugin(Plugin):
                 error_msg = "IBM API Connect Federated API Management sync enabled but required fields missing (base_url, username, password, or runtime_id). Plugin initialization failed."
                 logger.error(error_msg)
                 raise ValueError(error_msg)
-            
+
             # Store runtime ID
             self._runtime_id = self._cfg.fam_runtime_id
-            
+
             # Create FAM client with runtime ID (type assertions safe due to validation above)
             assert self._cfg.fam_base_url is not None
             assert self._runtime_id is not None
             assert self._cfg.fam_username is not None
             assert self._cfg.fam_password is not None
-            
+
             self._fam_client = FAMAssetCatalogClient(
                 base_url=self._cfg.fam_base_url,
                 runtime_id=self._runtime_id,
                 username=self._cfg.fam_username,
                 password=self._cfg.fam_password,
                 timeout=self._cfg.fam_timeout,
-                verify_ssl=self._cfg.fam_verify_ssl
+                verify_ssl=self._cfg.fam_verify_ssl,
             )
-            
+
             logger.info(f"IBM API Connect Federated API Management sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
             logger.info(f"IBM API Connect Federated API Management Base URL: {self._cfg.fam_base_url}")
             logger.info(f"Runtime ID: {self._runtime_id}")
             logger.info(f"Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
             logger.info(f"Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
             logger.info(f"Circuit Breaker: Enabled (default)")
-            
+
             # Initialize activity orchestrator
             self._orchestrator = ActivityOrchestrator(
                 fam_client=self._fam_client,
@@ -153,9 +158,9 @@ class APIConnectFAMPlugin(Plugin):
                 heartbeat_interval=self._cfg.fam_runtime_heartbeat_interval_seconds,
                 metrics_interval=self._cfg.metrics_sync_interval if self._cfg.metrics_sync_enabled else 0,
                 server_sync_interval=self._cfg.fam_asset_sync_interval if self._cfg.fam_asset_sync_enabled else 0,
-                tool_sync_interval=self._cfg.fam_asset_sync_interval if self._cfg.fam_asset_sync_enabled else 0
+                tool_sync_interval=self._cfg.fam_asset_sync_interval if self._cfg.fam_asset_sync_enabled else 0,
             )
-            
+
             # Start orchestrator (will perform registration first, then start activities)
             logger.info("Starting activity orchestrator...")
             await self._orchestrator.start()
@@ -164,12 +169,12 @@ class APIConnectFAMPlugin(Plugin):
     async def shutdown(self) -> None:
         """Stop the activity orchestrator and close HTTP client."""
         logger.info("Shutting down APIConnectFAMPlugin")
-        
+
         # Stop orchestrator
         if self._orchestrator:
             await self._orchestrator.stop()
             logger.info("Activity orchestrator stopped")
-        
+
         # Close IBM API Connect Federated API Management client
         if self._fam_client:
             await self._fam_client.close()

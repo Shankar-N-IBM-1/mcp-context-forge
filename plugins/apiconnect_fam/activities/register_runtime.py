@@ -57,7 +57,7 @@ class RegisterRuntimeActivity(AbstractActivity):
                 raise RegistrationError("Runtime registration returned no runtime ID")
 
             self._runtime_id = report.runtime_id
-            
+
             # Check if this is a re-registration (200/409) or first registration (201)
             if report.status_code in (200, 409):
                 self.logger.info(f"Re-registration detected (status {report.status_code})")
@@ -67,12 +67,12 @@ class RegisterRuntimeActivity(AbstractActivity):
                     self.logger.info(f"Last asset sync: {report.last_asset_sync_time}")
             else:
                 self.logger.info(f"First-time registration (status {report.status_code})")
-            
+
             self.logger.info(f"Runtime registered successfully with ID: {report.runtime_id}, status: {report.status_code}")
 
             # Update context with runtime ID
             self.context.runtime_id = report.runtime_id
-            
+
             # TODO: Implement recovery handler for re-registration
             # When re-registration is detected (status 200/409), should trigger recovery for:
             # - Missed heartbeats (send INACTIVE heartbeats for missed intervals)
@@ -96,12 +96,12 @@ class RegisterRuntimeActivity(AbstractActivity):
         """
         self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v2/runtimes")
         self.logger.debug(f"Runtime Name: {self._runtime_config.get('name', 'ContextForge Gateway')}")
-        self.logger.debug(f"Runtime Type: {self._runtime_config.get('type', 'WEBMETHODS_GATEWAY')}")
-        
+        self.logger.debug(f"Runtime Type: {self._runtime_config.get('type', 'MCP_CONTEXT_FORGE')}")
+
         report = await self._fam_client.register_runtime(
             name=self._runtime_config.get("name", "ContextForge Gateway"),
             description=self._runtime_config.get("description", "ContextForge MCP Gateway Runtime"),
-            runtime_type=self._runtime_config.get("type", "WEBMETHODS_GATEWAY"),
+            runtime_type=self._runtime_config.get("type", "MCP_CONTEXT_FORGE"),
             deployment_type=self._runtime_config.get("deployment_type", "ON_PREMISE"),
             region=self._runtime_config.get("region"),
             location=self._runtime_config.get("location"),

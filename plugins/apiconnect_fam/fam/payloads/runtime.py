@@ -6,6 +6,7 @@ Authors: Shankar N
 FAM Runtime Payload Builder.
 """
 
+# Standard
 from typing import Any, Dict, List, Optional
 
 
@@ -76,7 +77,7 @@ class FAMRuntimePayload:
             "publishAssets": publish_assets,
             "syncAssets": sync_assets,
             "sendMetrics": send_metrics,
-            "icon": ""
+            "icon": "",
         }
 
         # Add optional fields

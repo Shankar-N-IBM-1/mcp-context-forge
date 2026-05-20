@@ -9,8 +9,8 @@ Syncs MCP tools to FAM Asset Catalog using bulk operations.
 """
 
 # Standard
-import json
 from collections import defaultdict
+import json
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 # Third-Party
@@ -135,7 +135,7 @@ class SyncToolsActivity(AbstractScheduledActivity):
         Raises:
             SyncError: If sync fails
         """
-        
+
         try:
             # Query and sync tools
             tools_synced = await with_retry(self._query_and_sync_tools, retry_config=RetryConfig(max_attempts=2, initial_delay=1.0), operation_name="Sync Tools")
@@ -186,9 +186,9 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 if server_id not in registered_servers:
                     self.logger.debug(f"Skipping tools for server {server_id} - server not yet registered to FAM")
                     continue
-                
+
                 self.logger.debug(f"Processing tools for server {server_id}...")
-                
+
                 # Bulk create new tools
                 if operations["create"]:
                     self.logger.debug(f"{len(operations['create'])} NEW tools to create")

@@ -85,11 +85,7 @@ class ActivityOrchestrator:
         }
 
         # Create registration activity (executed once during start)
-        self.register_activity = RegisterRuntimeActivity(
-            context=self.context,
-            fam_client=fam_client,
-            runtime_config=runtime_config
-        )
+        self.register_activity = RegisterRuntimeActivity(context=self.context, fam_client=fam_client, runtime_config=runtime_config)
 
         # Initialize scheduled activities
         # Note: Order matters! Servers must sync before tools
@@ -128,7 +124,7 @@ class ActivityOrchestrator:
 
         # Track if servers have been synced (for tool sync dependency)
         self._servers_synced_this_cycle = False
-        
+
         # Track if runtime has been registered to FAM
         # Server and tool sync should only happen AFTER runtime registration
         self._runtime_registered = False
@@ -159,29 +155,29 @@ class ActivityOrchestrator:
         """
         self._registered_servers.add(server_id)
         logger.debug(f"Server {server_id} marked as synced to FAM")
-    
+
     def is_server_registered(self, server_id: str) -> bool:
         """Check if a server has been registered to FAM.
-        
+
         Args:
             server_id: ContextForge server ID
-            
+
         Returns:
             True if server has been synced to FAM
         """
         return server_id in self._registered_servers
-    
+
     def get_registered_servers(self) -> set[str]:
         """Get set of all registered server IDs.
-        
+
         Returns:
             Set of ContextForge server IDs that have been registered to FAM
         """
         return self._registered_servers.copy()
-    
+
     def mark_runtime_registered(self) -> None:
         """Mark runtime as registered to FAM.
-        
+
         Called after successful runtime registration.
         Enables server and tool sync activities.
         """
@@ -190,7 +186,7 @@ class ActivityOrchestrator:
 
     async def start(self) -> None:
         """Start the orchestrator and begin activity execution.
-        
+
         Performs runtime registration first, then starts the activity loop.
         """
         if self._running:
@@ -199,14 +195,14 @@ class ActivityOrchestrator:
 
         # Execute runtime registration before starting activities
         logger.info("Executing runtime registration activity")
-        
+
         try:
             await self.register_activity.perform()
-            
+
             # Mark runtime as registered (enables server and tool sync)
             self._runtime_registered = True
             logger.info("Runtime registration complete - all activities enabled")
-            
+
         except Exception as e:
             error_msg = f"Runtime registration failed: {e}"
             logger.error(error_msg, exc_info=True)
@@ -258,7 +254,7 @@ class ActivityOrchestrator:
                             if not self._runtime_registered:
                                 logger.debug("Skipping server sync - waiting for runtime registration to complete first")
                                 continue
-                        
+
                         # Special handling for tool sync - must wait for runtime registration AND server sync
                         if activity == self.tool_sync_activity:
                             if not self._runtime_registered:
@@ -294,7 +290,7 @@ class ActivityOrchestrator:
 
         Called after runtime registration to recover any missed
         heartbeats, metrics, or asset syncs.
-        
+
         TODO: Implement recovery handler
         - Recover missed heartbeats (send INACTIVE heartbeats for missed intervals)
         - Recover missed metrics (send historical metrics data)

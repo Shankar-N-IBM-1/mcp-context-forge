@@ -11,4 +11,3 @@ Integrates with IBM API Connect Federated API Management.
 from plugins.apiconnect_fam.apiconnect_fam import APIConnectFAMPlugin
 
 __all__ = ["APIConnectFAMPlugin"]
-

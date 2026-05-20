@@ -6,6 +6,7 @@ Authors: Shankar N
 FAM Metrics Payload Builder.
 """
 
+# Standard
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -52,9 +53,9 @@ class FAMMetricsPayload:
 
         return {
             "transactionCount": total_count,
-            "averageLatency": 0.0,  
+            "averageLatency": 0.0,
             "averageResponseTime": avg_response_time,
-            "averageBackendResponseTime": 0.0,  
+            "averageBackendResponseTime": 0.0,
         }
 
     @staticmethod

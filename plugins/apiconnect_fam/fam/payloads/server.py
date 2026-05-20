@@ -6,6 +6,7 @@ Authors: Shankar N
 FAM Server Payload Builder.
 """
 
+# Standard
 from typing import Any, Dict, List, Optional
 
 
@@ -123,7 +124,7 @@ class FAMServerPayload:
             payload["description"] = description
 
         # Add URL if available
-        if hasattr(server, 'url') and server.url:
+        if hasattr(server, "url") and server.url:
             payload["url"] = cls._truncate_string(server.url, 2048)
 
         payload["status"] = cls._get_status(server.enabled)
