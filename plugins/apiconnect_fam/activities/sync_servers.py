@@ -1,4 +1,9 @@
-"""Sync Servers Activity.
+"""Location: ./plugins/apiconnect_fam/activities/sync_servers.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Sync Servers Activity.
 
 Syncs MCP servers to FAM Asset Catalog.
 """

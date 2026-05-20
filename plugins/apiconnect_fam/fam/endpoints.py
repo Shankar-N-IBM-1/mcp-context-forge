@@ -1,12 +1,14 @@
-"""FAM API Endpoint Constants.
-
+"""Location: ./plugins/apiconnect_fam/fam/endpoints.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+IBM API Connect Federated API Management API Endpoint Constants.
 """
 
 
 class FAMEndpoints:
-    """FAM Asset Catalog and Engine API endpoint constants."""
+    """IBM API Connect Federated API Management Asset Catalog and Engine API endpoint constants."""
     
     # Asset Catalog API v1 - Servers
     SERVERS_BASE = "/api/assetcatalog/v1/runtimes/{runtime_id}/mcp-servers"
@@ -27,5 +29,3 @@ class FAMEndpoints:
     
     # Engine API v3 - Metrics
     METRICS = "/api/engine/v3/runtimes/{runtime_id}/metrics"
-
-

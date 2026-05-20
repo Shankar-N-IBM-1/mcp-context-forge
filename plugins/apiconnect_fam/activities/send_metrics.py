@@ -1,4 +1,9 @@
-"""Send Metrics Activity.
+"""Location: ./plugins/apiconnect_fam/activities/send_metrics.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Send Metrics Activity.
 
 Sends runtime metrics to FAM periodically.
 """

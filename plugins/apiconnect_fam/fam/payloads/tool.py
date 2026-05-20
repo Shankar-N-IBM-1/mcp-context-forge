@@ -1,7 +1,9 @@
-"""FAM Tool Payload Builder.
-
+"""Location: ./plugins/apiconnect_fam/fam/payloads/tool.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+FAM Tool Payload Builder.
 """
 
 from typing import Any, Dict, List, Optional
@@ -224,5 +226,3 @@ class FAMToolPayload:
             payload["tags"] = tags
 
         return payload
-
-

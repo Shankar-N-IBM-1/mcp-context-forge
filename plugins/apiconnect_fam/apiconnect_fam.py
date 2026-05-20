@@ -1,10 +1,15 @@
-"""API Connect FAM Plugin for ContextForge.
+"""Location: ./plugins/apiconnect_fam/apiconnect_fam.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
 
-Integrates ContextForge with webMethods API Control Plane FAM (Federated API Management).
-Syncs servers, tools, and metrics to FAM Asset Catalog API.
+IBM API Connect Federated API Management Plugin for ContextForge.
+
+Integrates ContextForge with IBM API Connect Federated API Management.
+Syncs servers, tools, and metrics to IBM API Connect Federated API Management Asset Catalog API.
 
 Features:
-- Runtime registration with FAM
+- Runtime registration with IBM API Connect Federated API Management
 - Periodic heartbeat to maintain connection
 - Server and tool synchronization with change detection
 - Metrics synchronization
@@ -23,21 +28,21 @@ logger = logging.getLogger(__name__)
 
 
 class APIConnectFAMConfig(BaseModel):
-    """Configuration for API Connect FAM plugin.
+    """Configuration for IBM API Connect Federated API Management plugin.
     
     Attributes:
         interval_seconds: How often to sync servers (in seconds).
         log_details: Whether to log detailed server information.
-        fam_enabled: Whether to sync servers to FAM.
-        fam_base_url: Base URL for FAM API (e.g., https://fam.example.com).
-        fam_runtime_id: Runtime ID to use when syncing to FAM (REQUIRED when fam_enabled is true).
-        fam_username: FAM username for Basic Authentication.
-        fam_password: FAM password for Basic Authentication.
+        fam_enabled: Whether to sync servers to IBM API Connect Federated API Management.
+        fam_base_url: Base URL for IBM API Connect Federated API Management API (e.g., https://fam.example.com).
+        fam_runtime_id: Runtime ID to use when syncing to IBM API Connect Federated API Management (REQUIRED when fam_enabled is true).
+        fam_username: IBM API Connect Federated API Management username for Basic Authentication.
+        fam_password: IBM API Connect Federated API Management password for Basic Authentication.
         fam_timeout: HTTP request timeout in seconds.
         fam_verify_ssl: Whether to verify SSL certificates (set False for self-signed certs).
-        fam_asset_sync_enabled: Whether to sync assets (servers/tools) to FAM.
+        fam_asset_sync_enabled: Whether to sync assets (servers/tools) to IBM API Connect Federated API Management.
         fam_asset_sync_interval: How often to sync assets (in seconds).
-        metrics_sync_enabled: Whether to sync metrics to FAM.
+        metrics_sync_enabled: Whether to sync metrics to IBM API Connect Federated API Management.
         metrics_sync_interval: How often to sync metrics (in seconds). Also used as time window for metrics collection.
         fam_runtime_name: Runtime display name (for reference only).
         fam_runtime_description: Runtime description (for reference only).
@@ -50,16 +55,16 @@ class APIConnectFAMConfig(BaseModel):
         fam_runtime_capacity_value: Capacity value (for reference only).
         fam_runtime_capacity_unit: Capacity unit (for reference only).
         fam_runtime_heartbeat_interval: Heartbeat sync interval in milliseconds (for reference only).
-        fam_heartbeat_interval_seconds: How often to send heartbeats (in seconds, mandatory when FAM enabled).
+        fam_heartbeat_interval_seconds: How often to send heartbeats (in seconds, mandatory when IBM API Connect Federated API Management enabled).
     """
 
     interval_seconds: int = 60
     log_details: bool = True
     fam_enabled: bool = False
-    fam_base_url: Optional[str] = Field(default=None, description="FAM API base URL")
-    fam_runtime_id: Optional[str] = Field(default=None, description="FAM runtime ID (REQUIRED when fam_enabled is true)")
-    fam_username: Optional[str] = Field(default=None, description="FAM username for Basic Authentication")
-    fam_password: Optional[str] = Field(default=None, description="FAM password for Basic Authentication")
+    fam_base_url: Optional[str] = Field(default=None, description="IBM API Connect Federated API Management API base URL")
+    fam_runtime_id: Optional[str] = Field(default=None, description="IBM API Connect Federated API Management runtime ID (REQUIRED when fam_enabled is true)")
+    fam_username: Optional[str] = Field(default=None, description="IBM API Connect Federated API Management username for Basic Authentication")
+    fam_password: Optional[str] = Field(default=None, description="IBM API Connect Federated API Management password for Basic Authentication")
     fam_timeout: int = 30
     fam_verify_ssl: bool = True  # Verify SSL certificates by default
     fam_asset_sync_enabled: bool = True
@@ -70,7 +75,7 @@ class APIConnectFAMConfig(BaseModel):
     # Runtime metadata (for reference only, not used after initial registration)
     fam_runtime_name: str = "ContextForge Gateway"
     fam_runtime_description: str = "ContextForge MCP Gateway Runtime"
-    fam_runtime_type: str = "WEBMETHODS_GATEWAY"
+    fam_runtime_type: str = "MCP_CONTEXT_FORGE"
     fam_runtime_deployment_type: str = "ON_PREMISE"
     fam_runtime_region: Optional[str] = Field(default=None, description="Runtime region")
     fam_runtime_location: Optional[str] = Field(default=None, description="Runtime location")
@@ -82,7 +87,7 @@ class APIConnectFAMConfig(BaseModel):
 
 
 class APIConnectFAMPlugin(Plugin):
-    """API Connect FAM integration plugin - syncs servers, tools, and metrics to FAM.
+    """IBM API Connect Federated API Management integration plugin - syncs servers, tools, and metrics to IBM API Connect Federated API Management.
     
     The plugin delegates all sync operations to the orchestrator, which
     manages activity execution, scheduling, statistics, and recovery.
@@ -106,11 +111,11 @@ class APIConnectFAMPlugin(Plugin):
         """Start the activity orchestrator and HTTP client."""
         logger.info(f"Initializing APIConnectFAMPlugin with interval={self._cfg.interval_seconds}s")
         
-        # Initialize FAM client if sync is enabled
+        # Initialize IBM API Connect Federated API Management client if sync is enabled
         if self._cfg.fam_enabled:
             # Check if we have all required fields: base URL, username, password, and runtime_id
             if not all([self._cfg.fam_base_url, self._cfg.fam_username, self._cfg.fam_password, self._cfg.fam_runtime_id]):
-                error_msg = "FAM sync enabled but required fields missing (base_url, username, password, or runtime_id). Plugin initialization failed."
+                error_msg = "IBM API Connect Federated API Management sync enabled but required fields missing (base_url, username, password, or runtime_id). Plugin initialization failed."
                 logger.error(error_msg)
                 raise ValueError(error_msg)
             
@@ -132,8 +137,8 @@ class APIConnectFAMPlugin(Plugin):
                 verify_ssl=self._cfg.fam_verify_ssl
             )
             
-            logger.info(f"FAM sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
-            logger.info(f"FAM Base URL: {self._cfg.fam_base_url}")
+            logger.info(f"IBM API Connect Federated API Management sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
+            logger.info(f"IBM API Connect Federated API Management Base URL: {self._cfg.fam_base_url}")
             logger.info(f"Runtime ID: {self._runtime_id}")
             logger.info(f"Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
             logger.info(f"Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
@@ -165,8 +170,8 @@ class APIConnectFAMPlugin(Plugin):
             await self._orchestrator.stop()
             logger.info("Activity orchestrator stopped")
         
-        # Close FAM client
+        # Close IBM API Connect Federated API Management client
         if self._fam_client:
             await self._fam_client.close()
             self._fam_client = None
-            logger.info("FAM client closed")
+            logger.info("IBM API Connect Federated API Management client closed")

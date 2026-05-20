@@ -1,10 +1,10 @@
-"""Data Models for Server Monitor Plugin.
-
-Defines core data models used throughout the plugin, following patterns
-from webMethods Agent SDK.
-
+"""Location: ./plugins/apiconnect_fam/models.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Data Models for Server Monitor Plugin.
+Defines core data models used throughout the plugin.
 """
 
 from enum import Enum
@@ -32,7 +32,7 @@ class HeartbeatStatus(str, Enum):
 
 
 class ReregistrationReport(BaseModel):
-    """Report received from FAM on runtime registration.
+    """Report received from IBM API Connect Federated API Management on runtime registration.
     
     Contains timestamps of last successful sync operations,
     used to trigger recovery of missed data.
@@ -84,7 +84,7 @@ class ActivityContext(BaseModel):
     
     Attributes:
         runtime_id: Runtime ID for this agent
-        fam_base_url: Base URL for FAM API
+        fam_base_url: Base URL for IBM API Connect Federated API Management API
         config: Plugin configuration dictionary
     """
     
@@ -112,15 +112,13 @@ class InactiveHeartbeat(BaseModel):
     status: HeartbeatStatus = HeartbeatStatus.INACTIVE
     
     def to_payload(self) -> Dict[str, Any]:
-        """Convert to FAM API payload format.
+        """Convert to IBM API Connect Federated API Management API payload format.
         
         Returns:
-            Dictionary for FAM heartbeat API
+            Dictionary for IBM API Connect Federated API Management heartbeat API
         """
         return {
             "runtimeId": self.runtime_id,
             "created": self.created,
             "active": 0  # 0 = inactive, 1 = active
         }
-
-

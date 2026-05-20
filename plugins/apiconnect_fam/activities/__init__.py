@@ -1,10 +1,10 @@
-"""Activity modules for Server Monitor Plugin.
-
-Activities represent discrete operations that can be scheduled and executed.
-Follows webMethods Agent SDK activity pattern.
-
+"""Location: ./plugins/apiconnect_fam/activities/__init__.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Activity modules for Server Monitor Plugin.
+Activities represent discrete operations that can be scheduled and executed.
 """
 
 # Local
@@ -24,5 +24,3 @@ __all__ = [
     "SyncServersActivity",
     "SyncToolsActivity",
 ]
-
-

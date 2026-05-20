@@ -1,4 +1,9 @@
-"""Abstract base class for state tracking with content hashing.
+"""Location: ./plugins/apiconnect_fam/activities/state_tracker.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Abstract base class for state tracking with content hashing.
 
 This module provides a common foundation for tracking entity state (servers, tools)
 using SHA-256 content hashing for change detection.
@@ -110,5 +115,4 @@ class AbstractStateTracker(ABC):
         """
         data_str = json.dumps(data, sort_keys=True)
         return hashlib.sha256(data_str.encode()).hexdigest()
-
 

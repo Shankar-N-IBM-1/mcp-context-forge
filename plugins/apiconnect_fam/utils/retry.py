@@ -1,10 +1,10 @@
-"""Retry Logic with Exponential Backoff.
-
-Provides retry mechanisms for handling transient failures,
-following resilience patterns from webMethods Agent SDK.
-
+"""Location: ./plugins/apiconnect_fam/utils/retry.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Retry Logic with Exponential Backoff.
+Provides retry mechanisms for handling transient failures.
 """
 
 import asyncio
@@ -266,5 +266,3 @@ class CircuitBreaker:
         except Exception as e:
             self.record_failure()
             raise e
-
-

@@ -1,9 +1,10 @@
-"""Custom Exceptions for Server Monitor Plugin.
-
-Defines exception hierarchy for better error handling and debugging.
-
+"""Location: ./plugins/apiconnect_fam/utils/errors.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Custom Exceptions for Server Monitor Plugin.
+Defines exception hierarchy for better error handling and debugging.
 """
 
 
@@ -37,7 +38,7 @@ class SyncError(AgentError):
 
 
 class FAMClientError(AgentError):
-    """Error in FAM API client operations."""
+    """Error in IBM API Connect Federated API Management API client operations."""
     pass
 
 
@@ -60,5 +61,3 @@ class RetryExhaustedError(AgentError):
         super().__init__(message, last_error)
         self.attempts = attempts
         self.last_error = last_error
-
-

@@ -1,7 +1,9 @@
-"""FAM Server Payload Builder.
-
+"""Location: ./plugins/apiconnect_fam/fam/payloads/server.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+FAM Server Payload Builder.
 """
 
 from typing import Any, Dict, List, Optional
@@ -169,5 +171,3 @@ class FAMServerPayload:
             payload["tags"] = tags
 
         return payload
-
-

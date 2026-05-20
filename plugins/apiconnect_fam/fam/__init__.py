@@ -1,10 +1,11 @@
-"""FAM Client Module.
-
-This module provides a modular interface to the FAM (Federated API Management)
-Asset Catalog and Engine APIs.
-
+"""Location: ./plugins/apiconnect_fam/fam/__init__.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+FAM Client Module.
+This module provides a modular interface to the FAM (Federated API Management)
+Asset Catalog and Engine APIs.
 """
 
 # Export main client
@@ -32,5 +33,3 @@ __all__ = [
     "FAMServerPayload",
     "FAMToolPayload",
 ]
-
-

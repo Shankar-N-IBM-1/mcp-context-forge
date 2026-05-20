@@ -1,7 +1,11 @@
-"""Base Activity Classes.
+"""Location: ./plugins/apiconnect_fam/activities/base.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Base Activity Classes.
 
 Defines abstract base classes for all activities.
-
 """
 
 # Standard
@@ -73,7 +77,6 @@ class AbstractScheduledActivity(AbstractActivity):
     """Base class for scheduled activities.
 
     Scheduled activities run periodically at a fixed interval.
-    Following webMethods SDK pattern for scheduled tasks.
 
     Attributes:
         context: Shared activity context

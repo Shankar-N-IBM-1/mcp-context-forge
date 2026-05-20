@@ -1,4 +1,9 @@
-"""Activity Orchestrator for Server Monitor Plugin.
+"""Location: ./plugins/apiconnect_fam/activity_orchestrator.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Activity Orchestrator for Server Monitor Plugin.
 
 Coordinates activity execution, statistics tracking, and health monitoring.
 """
@@ -25,11 +30,11 @@ class ActivityOrchestrator:
     """Orchestrates all activities for the Server Monitor Plugin.
 
     Manages activity lifecycle, execution scheduling, statistics tracking,
-    and health monitoring following webMethods Agent SDK patterns.
+    and health monitoring.
 
     Attributes:
         context: Shared context for all activities
-        fam_client: FAM API client
+        fam_client: IBM API Connect Federated API Management API client
         activities: List of all managed activities
         _running: Whether orchestrator is running
         _task: Background task for activity execution
@@ -68,7 +73,7 @@ class ActivityOrchestrator:
         runtime_config = {
             "name": config.get("fam_runtime_name", "ContextForge Gateway"),
             "description": config.get("fam_runtime_description", "ContextForge MCP Gateway Runtime"),
-            "type": config.get("fam_runtime_type", "WEBMETHODS_GATEWAY"),
+            "type": config.get("fam_runtime_type", "MCP_CONTEXT_FORGE"),
             "deployment_type": config.get("fam_runtime_deployment_type", "ON_PREMISE"),
             "region": config.get("fam_runtime_region"),
             "location": config.get("fam_runtime_location"),

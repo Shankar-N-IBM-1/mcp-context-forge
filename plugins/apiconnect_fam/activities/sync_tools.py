@@ -1,4 +1,9 @@
-"""Sync Tools Activity.
+"""Location: ./plugins/apiconnect_fam/activities/sync_tools.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Sync Tools Activity.
 
 Syncs MCP tools to FAM Asset Catalog using bulk operations.
 """

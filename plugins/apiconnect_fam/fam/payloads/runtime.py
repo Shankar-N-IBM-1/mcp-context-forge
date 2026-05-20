@@ -1,7 +1,9 @@
-"""FAM Runtime Payload Builder.
-
+"""Location: ./plugins/apiconnect_fam/fam/payloads/runtime.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+FAM Runtime Payload Builder.
 """
 
 from typing import Any, Dict, List, Optional
@@ -48,7 +50,7 @@ class FAMRuntimePayload:
             runtime_id: Runtime ID (required)
             name: Runtime display name (required)
             description: Runtime description (required)
-            runtime_type: Runtime type enum (default: WEBMETHODS_GATEWAY)
+            runtime_type: Runtime type enum (default: MCP_CONTEXT_FORGE)
             deployment_type: Deployment type enum (default: ON_PREMISE)
             region: Region identifier (e.g., "us-east-1")
             location: Location description (e.g., "US East")
@@ -92,5 +94,3 @@ class FAMRuntimePayload:
             payload["capacity"] = {"value": capacity_value, "unit": capacity_unit}
 
         return payload
-
-

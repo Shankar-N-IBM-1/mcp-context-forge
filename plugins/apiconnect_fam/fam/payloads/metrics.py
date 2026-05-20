@@ -1,7 +1,9 @@
-"""FAM Metrics Payload Builder.
-
+"""Location: ./plugins/apiconnect_fam/fam/payloads/metrics.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+FAM Metrics Payload Builder.
 """
 
 from datetime import datetime
@@ -169,5 +171,3 @@ class FAMMetricsPayload:
             "mcpServerTransactionMetricsList": mcp_server_metrics_list,
             "mcpServersTransactionMetricsSummary": summary_metrics,
         }
-
-

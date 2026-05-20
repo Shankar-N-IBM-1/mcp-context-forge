@@ -1,15 +1,15 @@
-"""Circuit Breaker Pattern for FAM API.
+"""Location: ./plugins/apiconnect_fam/circuit_breaker.py
+Copyright 2025
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
 
+Circuit Breaker Pattern for FAM API.
 Implements the Circuit Breaker pattern to prevent cascading failures
 when FAM API is unavailable or experiencing issues.
-
 States:
 - CLOSED: Normal operation, requests pass through
 - OPEN: Failures exceeded threshold, requests fail fast
 - HALF_OPEN: Testing if service recovered, limited requests allowed
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 import asyncio
@@ -230,5 +230,3 @@ class CircuitBreaker:
             "recovery_timeout": self.recovery_timeout,
             "time_until_retry": self._time_until_retry() if self._state == CircuitState.OPEN else 0.0
         }
-
-

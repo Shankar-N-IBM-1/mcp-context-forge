@@ -1,7 +1,9 @@
-"""FAM Asset Catalog Client.
-
+"""Location: ./plugins/apiconnect_fam/fam/client.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+IBM API Connect Federated API Management Asset Catalog Client.
 """
 
 import base64
@@ -19,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 class FAMAssetCatalogClient:
-    """Client for FAM Asset Catalog API v1.
+    """Client for IBM API Connect Federated API Management Asset Catalog API v1.
 
     Handles MCP Server lifecycle operations (create, update, delete) with
     proper error handling and logging.
 
     Attributes:
-        base_url: FAM API base URL
+        base_url: IBM API Connect Federated API Management API base URL
         runtime_id: Runtime identifier for API requests
         http_client: Async HTTP client for API calls
     """
@@ -42,13 +44,13 @@ class FAMAssetCatalogClient:
         circuit_breaker_failure_threshold: int = 5,
         circuit_breaker_recovery_timeout: float = 60.0
     ):
-        """Initialize FAM client.
+        """Initialize IBM API Connect Federated API Management client.
 
         Args:
-            base_url: FAM API base URL (e.g., https://fam.example.com)
+            base_url: IBM API Connect Federated API Management API base URL (e.g., https://fam.example.com)
             runtime_id: Runtime identifier
-            username: FAM username for Basic Authentication
-            password: FAM password for Basic Authentication
+            username: IBM API Connect Federated API Management username for Basic Authentication
+            password: IBM API Connect Federated API Management password for Basic Authentication
             timeout: HTTP request timeout in seconds
             verify_ssl: Whether to verify SSL certificates (default: True, set False for self-signed certs)
             circuit_breaker_enabled: Enable circuit breaker pattern (default: True)
@@ -131,7 +133,7 @@ class FAMAssetCatalogClient:
     ) -> Any:
         """Execute function with standardized error handling and circuit breaker protection.
         
-        This method provides a centralized error handling pattern for all FAM API calls:
+        This method provides a centralized error handling pattern for all IBM API Connect Federated API Management API calls:
         - Circuit breaker protection (if enabled)
         - HTTP status error handling with detailed logging
         - HTTP error handling (connection, timeout, etc.)
@@ -153,7 +155,7 @@ class FAMAssetCatalogClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(
-                f"FAM API error {operation_name}: "
+                f"IBM API Connect Federated API Management API error {operation_name}: "
                 f"status={e.response.status_code}, body={e.response.text}"
             )
             return default_return
@@ -224,7 +226,7 @@ class FAMAssetCatalogClient:
         sync_assets: bool = True,
         send_metrics: bool = True,
     ) -> Optional[ReregistrationReport]:
-        """Register or update runtime in FAM Asset Catalog API v2.
+        """Register or update runtime in IBM API Connect Federated API Management Asset Catalog API v2.
 
         POST /api/assetcatalog/v2/runtimes
 
@@ -240,9 +242,9 @@ class FAMAssetCatalogClient:
             capacity_value: Capacity value (e.g., "50")
             capacity_unit: Capacity unit (e.g., "per minute")
             heartbeat_interval: Heartbeat sync interval in seconds
-            publish_assets: Whether to publish assets to FAM (default: True)
-            sync_assets: Whether to sync assets from FAM (default: True)
-            send_metrics: Whether to send metrics to FAM (default: True)
+            publish_assets: Whether to publish assets to IBM API Connect Federated API Management (default: True)
+            sync_assets: Whether to sync assets from IBM API Connect Federated API Management (default: True)
+            send_metrics: Whether to send metrics to IBM API Connect Federated API Management (default: True)
 
         Returns:
             ReregistrationReport with runtime ID and last sync timestamps if successful, None otherwise
@@ -341,7 +343,7 @@ class FAMAssetCatalogClient:
             logger.error(f"Circuit breaker open, cannot register runtime '{name}': {e}")
             return None
         except httpx.HTTPStatusError as e:
-            logger.error(f"FAM API error registering runtime '{name}': " f"status={e.response.status_code}, body={e.response.text}")
+            logger.error(f"IBM API Connect Federated API Management API error registering runtime '{name}': " f"status={e.response.status_code}, body={e.response.text}")
             return None
         except httpx.HTTPError as e:
             logger.error(f"HTTP error registering runtime '{name}': {e}")
@@ -351,7 +353,7 @@ class FAMAssetCatalogClient:
             return None
 
     async def send_heartbeat(self, runtime_id: str) -> bool:
-        """Send heartbeat for runtime to FAM Asset Catalog API v2.
+        """Send heartbeat for runtime to IBM API Connect Federated API Management Asset Catalog API v2.
 
         POST /api/engine/v2/runtimes/heartbeat
 
@@ -377,7 +379,7 @@ class FAMAssetCatalogClient:
         )
 
     async def create_server(self, server: Any) -> bool:
-        """Create MCP Server in FAM.
+        """Create MCP Server in IBM API Connect Federated API Management.
 
         POST /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers
 
@@ -391,13 +393,13 @@ class FAMAssetCatalogClient:
             payload = FAMServerPayload.build_create_payload(server)
             response = await self._http_client.post(self._endpoint, json=payload)
             
-            # Handle 409 Conflict as success (server already exists in FAM)
+            # Handle 409 Conflict as success (server already exists in IBM API Connect Federated API Management)
             if response.status_code == 409:
-                logger.info(f"Server {server.id} already exists in FAM (409 Conflict - treated as success)")
+                logger.info(f"Server {server.id} already exists in IBM API Connect Federated API Management (409 Conflict - treated as success)")
                 return True
             
             response.raise_for_status()
-            logger.info(f"Created MCP Server {server.id} in FAM")
+            logger.info(f"Created MCP Server {server.id} in IBM API Connect Federated API Management")
             return True
         
         return await self._execute_with_error_handling(
@@ -407,7 +409,7 @@ class FAMAssetCatalogClient:
         )
 
     async def update_server(self, server: Any) -> bool:
-        """Update MCP Server in FAM.
+        """Update MCP Server in IBM API Connect Federated API Management.
 
         PUT /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers/{id}
 
@@ -422,7 +424,7 @@ class FAMAssetCatalogClient:
             payload = FAMServerPayload.build_update_payload(server)
             response = await self._http_client.put(url, json=payload)
             response.raise_for_status()
-            logger.info(f"Updated MCP Server {server.id} in FAM")
+            logger.info(f"Updated MCP Server {server.id} in IBM API Connect Federated API Management")
             return True
         
         return await self._execute_with_error_handling(
@@ -432,7 +434,7 @@ class FAMAssetCatalogClient:
         )
 
     async def delete_server(self, server_id: str) -> bool:
-        """Delete MCP Server from FAM.
+        """Delete MCP Server from IBM API Connect Federated API Management.
 
         DELETE /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers/{id}
 
@@ -448,11 +450,11 @@ class FAMAssetCatalogClient:
             
             # 404 is acceptable for delete (already deleted)
             if response.status_code == 404:
-                logger.info(f"Server {server_id} not found in FAM (already deleted)")
+                logger.info(f"Server {server_id} not found in IBM API Connect Federated API Management (already deleted)")
                 return True
             
             response.raise_for_status()
-            logger.info(f"Deleted MCP Server {server_id} from FAM")
+            logger.info(f"Deleted MCP Server {server_id} from IBM API Connect Federated API Management")
             return True
         
         return await self._execute_with_error_handling(
@@ -462,7 +464,7 @@ class FAMAssetCatalogClient:
         )
 
     async def bulk_create_tools(self, tools: List[Any], server_id: str) -> Optional[str]:
-        """Bulk create MCP Tools in FAM.
+        """Bulk create MCP Tools in IBM API Connect Federated API Management.
 
         POST /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers/{mcpServerId}/mcp-tools/bulk/create
 
@@ -495,7 +497,7 @@ class FAMAssetCatalogClient:
         )
 
     async def bulk_update_tools(self, tools: List[Any], server_id: str) -> Optional[str]:
-        """Bulk update MCP Tools in FAM.
+        """Bulk update MCP Tools in IBM API Connect Federated API Management.
 
         POST /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers/{mcpServerId}/mcp-tools/bulk/update
 
@@ -528,7 +530,7 @@ class FAMAssetCatalogClient:
         )
 
     async def bulk_delete_tools(self, tool_ids: List[str], server_id: str) -> Optional[str]:
-        """Bulk delete MCP Tools from FAM.
+        """Bulk delete MCP Tools from IBM API Connect Federated API Management.
 
         POST /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers/{mcpServerId}/mcp-tools/bulk/delete
 
@@ -560,7 +562,7 @@ class FAMAssetCatalogClient:
         )
 
     async def submit_metrics(self, metrics_payload: Dict[str, Any]) -> bool:
-        """Submit metrics to FAM.
+        """Submit metrics to IBM API Connect Federated API Management.
 
         POST /api/engine/v3/runtimes/{runtimeId}/metrics
 
@@ -577,7 +579,7 @@ class FAMAssetCatalogClient:
             
             # Metrics endpoint returns 202 Accepted
             if response.status_code == 202:
-                logger.info(f"Successfully submitted metrics to FAM for runtime {self.runtime_id}")
+                logger.info(f"Successfully submitted metrics to IBM API Connect Federated API Management for runtime {self.runtime_id}")
                 return True
             else:
                 logger.warning(f"Unexpected status code {response.status_code} when submitting metrics")

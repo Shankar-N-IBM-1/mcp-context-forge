@@ -1,4 +1,9 @@
-"""Send Heartbeat Activity.
+"""Location: ./plugins/apiconnect_fam/activities/send_heartbeat.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+Send Heartbeat Activity.
 
 Sends runtime heartbeat to FAM periodically.
 """
@@ -79,4 +84,3 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
             self.logger.debug("FAM API call successful")
         else:
             raise Exception("Heartbeat failed")
-

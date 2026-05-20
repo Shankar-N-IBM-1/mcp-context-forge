@@ -1,7 +1,9 @@
-"""FAM Payload Builders.
-
+"""Location: ./plugins/apiconnect_fam/fam/payloads/__init__.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
+Authors: Shankar N
+
+FAM Payload Builders.
 """
 
 from .metrics import FAMMetricsPayload
@@ -15,5 +17,3 @@ __all__ = [
     "FAMServerPayload",
     "FAMToolPayload",
 ]
-
-
