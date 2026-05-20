@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for token_validation_service."""
+"""Location: ./tests/unit/mcpgateway/services/test_token_validation_service.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
+
+Unit tests for token_validation_service.
+"""
 
 # Standard
 from unittest.mock import patch
@@ -58,7 +64,7 @@ class TestTokenValidationResult:
     def test_blocking_errors_audience_mismatch(self):
         r = TokenValidationResult(is_jwt=True)
         r.audience_match = False
-        r.warnings.append("Token audience mismatch: token aud=[api://wrong], expected 'api://correct'")
+        r.warnings.append("Token audience mismatch: token aud does not match expected resource or gateway URL")
         errors = r.blocking_errors
         assert len(errors) == 1
         assert "audience" in errors[0].lower()
@@ -85,7 +91,7 @@ class TestTokenValidationResult:
         r.scopes_sufficient = False
         r.issuer_match = False
         r.warnings = [
-            "Token audience mismatch: token aud=[wrong], expected 'right'",
+            "Token audience mismatch: token aud does not match expected resource or gateway URL",
             "Token may be missing required scopes: [write]",
             "Token issuer mismatch: token iss='wrong', expected 'right'",
         ]
@@ -96,7 +102,7 @@ class TestTokenValidationResult:
         r = TokenValidationResult(is_jwt=True)
         r.audience_match = False
         r.scopes_sufficient = None  # absent claim — must not block
-        r.warnings.append("Token audience mismatch: token aud=[wrong], expected 'right'")
+        r.warnings.append("Token audience mismatch: token aud does not match expected resource or gateway URL")
         errors = r.blocking_errors
         assert len(errors) == 1
         assert "audience" in errors[0].lower()
@@ -139,6 +145,46 @@ class TestNormalizeScope:
 
     def test_empty_string(self):
         assert _normalize_scope("") == set()
+
+    def test_list_input_simple_scopes(self):
+        """Test that _normalize_scope handles list input (OAuth providers like Gamma)."""
+        scopes = _normalize_scope(["read", "write"])
+        assert "read" in scopes
+        assert "write" in scopes
+
+    def test_list_input_uri_prefixed_scopes(self):
+        """Test that _normalize_scope handles list with URI-prefixed scopes."""
+        scopes = _normalize_scope(["api://app-a/Tools.Read", "api://app-a/Tools.Write"])
+        assert "api://app-a/Tools.Read" in scopes
+        assert "Tools.Read" in scopes
+        assert "api://app-a/Tools.Write" in scopes
+        assert "Tools.Write" in scopes
+
+    def test_empty_list(self):
+        """Test that _normalize_scope handles empty list."""
+        assert _normalize_scope([]) == set()
+
+    def test_mixed_list_with_uri_and_simple(self):
+        """Test that _normalize_scope handles mixed list of URI and simple scopes."""
+        scopes = _normalize_scope(["read", "api://app-a/Tools.Write", "admin"])
+        assert "read" in scopes
+        assert "admin" in scopes
+        assert "api://app-a/Tools.Write" in scopes
+        assert "Tools.Write" in scopes
+
+    def test_invalid_input_type(self):
+        """Test that _normalize_scope handles invalid input gracefully."""
+        assert _normalize_scope(None) == set()
+        assert _normalize_scope(123) == set()
+        assert _normalize_scope({}) == set()
+
+    def test_list_with_non_string_elements(self):
+        """Test that _normalize_scope filters out non-string list elements safely."""
+        scopes = _normalize_scope(["read", 123, None, "write"])
+        assert "read" in scopes
+        assert "write" in scopes
+        assert 123 not in scopes
+        assert None not in scopes
 
 
 # ---------- validate_oauth_token_claims ----------
@@ -215,6 +261,22 @@ class TestValidateOauthTokenClaims:
         assert result.audience_match is None
         assert not any("audience" in w.lower() for w in result.warnings)
 
+    def test_audience_resource_list_matches(self):
+        """When resource is a list (learned from IdP aud array), any overlap is a match."""
+        token = _make_jwt({"aud": "my-client-id"})
+        oauth_config = {"resource": ["https://api.example.com", "my-client-id"]}
+        result = validate_oauth_token_claims(token, oauth_config, "https://gw.example.com", "test-gw")
+
+        assert result.audience_match is True
+
+    def test_audience_resource_takes_precedence_over_gateway_url(self):
+        """When resource is set, gateway_url is not used as fallback."""
+        token = _make_jwt({"aud": "https://gw.example.com"})
+        oauth_config = {"resource": "some-other-value"}
+        result = validate_oauth_token_claims(token, oauth_config, "https://gw.example.com", "test-gw")
+
+        assert result.audience_match is False
+
     # -- Scope mismatch --
 
     def test_scope_mismatch(self):
@@ -256,6 +318,32 @@ class TestValidateOauthTokenClaims:
 
         # Nothing to compare against
         assert result.scopes_sufficient is None
+
+    def test_empty_list_scope_claim(self):
+        """Empty list scope should be treated as insufficient, not skipped."""
+        token = _make_jwt({"scope": []})
+        oauth_config = {"scopes": ["read"]}
+        result = validate_oauth_token_claims(token, oauth_config, "https://gw.example.com", "test-gw")
+
+        assert result.scopes_sufficient is False
+        assert any("missing required scopes" in w.lower() for w in result.warnings)
+
+    def test_list_scope_mismatch(self):
+        """List-valued scopes with missing required scopes should be flagged."""
+        token = _make_jwt({"scope": ["read", "admin"]})
+        oauth_config = {"scopes": ["write"]}
+        result = validate_oauth_token_claims(token, oauth_config, "https://gw.example.com", "test-gw")
+
+        assert result.scopes_sufficient is False
+        assert any("missing required scopes" in w.lower() for w in result.warnings)
+
+    def test_list_scope_match(self):
+        """List-valued scopes that satisfy required scopes should pass."""
+        token = _make_jwt({"scope": ["read", "write"]})
+        oauth_config = {"scopes": ["write"]}
+        result = validate_oauth_token_claims(token, oauth_config, "https://gw.example.com", "test-gw")
+
+        assert result.scopes_sufficient is True
 
     # -- Issuer mismatch --
 

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-Location: ./mcpgateway/services/metrics.py
-Copyright 2025
+"""Location: ./mcpgateway/services/metrics.py
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
 
 ContextForge Metrics Service.
 
@@ -45,7 +45,7 @@ import re
 
 # Third-Party
 from fastapi import Depends, Request, Response, status
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest, REGISTRY
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest, Histogram, REGISTRY
 from prometheus_fastapi_instrumentator import Instrumentator
 
 # First-Party
@@ -108,7 +108,7 @@ content_size_violations_counter = Counter(
 content_type_violations_counter = Counter(
     "content_type_violations_total",
     "Total number of MIME type violations",
-    ["content_type"],  # "resource" or "prompt" — rejected type is in logs, not labels (unbounded cardinality)
+    ["content_type", "mime_type"],  # content_type: "resource" or "prompt", mime_type: the rejected type
 )
 
 # MCP Auth Cache Metrics
@@ -118,17 +118,11 @@ mcp_auth_cache_events_counter = Counter(
     ["outcome"],
 )
 
-# OAuth / JWKS access-token verification on oauth_enabled virtual servers.
-# Outcome labels:
-#   success          — IdP-issued token verified and user context populated
-#   failed           — verification attempted and rejected (401/503 emitted)
-#   not_applicable   — target server is not oauth_enabled, issuer outside the
-#                      allowlist, token undecodable, or URL path missing a
-#                      server id; caller falls through to internal verify
+# OAuth Verification Metrics
 oauth_verify_events_counter = Counter(
     "oauth_verify_events_total",
-    "OAuth access token verification outcomes on virtual server MCP endpoints",
-    ["outcome"],
+    "Total number of OAuth token verification events by outcome",
+    ["outcome"],  # success, failed, error, not_applicable
 )
 
 # Streamable HTTP GET rejections. Clients that probe a passive SSE stream
@@ -178,6 +172,24 @@ server_event_bus_publish_failed_counter = Counter(
     "server_event_bus_publish_failed_total",
     "Server-event-bus publish attempts that failed",
     ["reason"],
+)
+
+siem_events_exported_total = Counter(
+    "siem_events_exported_total",
+    "Total SIEM export attempts by destination and status",
+    ["destination", "status"],
+)
+
+siem_export_latency_seconds = Histogram(
+    "siem_export_latency_seconds",
+    "SIEM export latency in seconds by destination",
+    ["destination"],
+)
+
+siem_queue_depth = Gauge(
+    "siem_queue_depth",
+    "Current SIEM queue depth by destination",
+    ["destination"],
 )
 
 

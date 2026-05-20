@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./tests/unit/mcpgateway/routers/test_oauth_router.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 # First-Party
 from mcpgateway.db import Gateway
+from mcpgateway.routers.oauth_router import enforce_fetch_tools_csrf
 from mcpgateway.schemas import EmailUserResponse
 from mcpgateway.services.oauth_manager import OAuthError
 
@@ -99,6 +100,241 @@ class TestNormalizeResourceUrl:
 
         result = _normalize_resource_url("https://example.com/path?x=1#frag", preserve_query=True)
         assert result == "https://example.com/path?x=1"
+
+
+class TestEnforceFetchToolsCsrf:
+    """Tests for enforce_fetch_tools_csrf."""
+
+    @pytest.fixture
+    def csrf_request(self):
+        request = Mock(spec=Request)
+        request.headers = {}
+        request.cookies = {}
+        return request
+
+    @pytest.mark.asyncio
+    async def test_bearer_token_skips_csrf(self, csrf_request):
+        csrf_request.headers = {"authorization": "Bearer abc123"}
+
+        assert await enforce_fetch_tools_csrf(csrf_request) is None
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", {"https://trusted.example.com"})
+    @pytest.mark.asyncio
+    async def test_valid_origin_with_matching_csrf_cookie_and_header(self, csrf_request):
+        csrf_request.headers = {
+            "origin": "https://gateway.example.com",
+            "x-csrf-token": "token-123",
+        }
+        csrf_request.cookies = {"mcpgateway_csrf_token": "token-123"}
+
+        assert await enforce_fetch_tools_csrf(csrf_request) is None
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_missing_origin_and_referer_raises_403(self, csrf_request):
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_invalid_origin_raises_403(self, csrf_request):
+        csrf_request.headers = {"origin": "https://evil.example.com"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_missing_csrf_cookie_raises_403(self, csrf_request):
+        csrf_request.headers = {"origin": "https://gateway.example.com", "x-csrf-token": "token-123"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_missing_csrf_header_raises_403(self, csrf_request):
+        csrf_request.headers = {"origin": "https://gateway.example.com"}
+        csrf_request.cookies = {"mcpgateway_csrf_token": "token-123"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_mismatched_csrf_cookie_and_header_raises_403(self, csrf_request):
+        csrf_request.headers = {"origin": "https://gateway.example.com", "x-csrf-token": "header-token"}
+        csrf_request.cookies = {"mcpgateway_csrf_token": "cookie-token"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @patch("mcpgateway.routers.oauth_router.urlparse", side_effect=Exception("parse error"))
+    @pytest.mark.asyncio
+    async def test_referer_parse_exception_raises_403(self, mock_urlparse, csrf_request):
+        csrf_request.headers = {"referer": "https://gateway.example.com", "x-csrf-token": "token-123"}
+        csrf_request.cookies = {"mcpgateway_csrf_token": "token-123"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+
+class TestPersistLearnedAudience:
+    """Tests for _persist_learned_audience helper."""
+
+    @pytest.mark.asyncio
+    async def test_persists_string_aud_from_jwt(self):
+        """Persists the aud claim as resource when token_aud is a string."""
+        oauth_result = {"token_aud": "my-client-id", "user_id": "u1"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "my-client-id", "grant_type": "authorization_code"}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        assert gateway.oauth_config["resource"] == "my-client-id"
+        db.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_persists_list_aud_from_jwt(self):
+        """Persists the full aud list when token_aud is an array."""
+        aud_list = ["https://api.example.com", "my-client-id"]
+        oauth_result = {"token_aud": aud_list, "user_id": "u1"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "my-client-id"}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        assert gateway.oauth_config["resource"] == aud_list
+        db.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_resource_already_set_to_same_value(self):
+        """First-write-only: does not flush when resource is already set, even if it matches."""
+        oauth_result = {"token_aud": "my-client-id", "user_id": "u1"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "my-client-id", "resource": "my-client-id"}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        db.flush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_resource_already_set_to_different_value(self):
+        """First-write-only: never overwrites a previously learned/configured resource.
+
+        The OAuth callback path only enforces gateway access, not gateways.update.
+        Allowing a non-admin user to overwrite a shared resource value would let
+        any authenticated user mutate global config on behalf of all other users.
+        """
+        oauth_result = {"token_aud": "new-client-id", "user_id": "u1"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "my-client-id", "resource": "previously-learned-id"}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        db.flush.assert_not_called()
+        assert gateway.oauth_config["resource"] == "previously-learned-id"
+
+    @pytest.mark.asyncio
+    async def test_skips_opaque_token(self):
+        """Gracefully skips when token_aud is None (opaque token)."""
+        oauth_result = {"token_aud": None, "user_id": "u1"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "cid"}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        db.flush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_token_aud(self):
+        """Gracefully skips when token_aud is missing from result."""
+        oauth_result = {"user_id": "u1"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "cid"}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        db.flush.assert_not_called()
+
+    @pytest.mark.parametrize("falsy_resource", ["", []])
+    @pytest.mark.asyncio
+    async def test_persists_when_existing_resource_is_falsy(self, falsy_resource):
+        """Empty string / empty list persisted resource counts as unset; re-learning proceeds.
+
+        This lets an admin clear the field via the gateway update API to trigger
+        re-learning on the next callback (recovery path after stale config).
+        """
+        oauth_result = {"token_aud": "fresh-client-id"}
+
+        gateway = Mock(spec=Gateway)
+        gateway.name = "Test GW"
+        gateway.oauth_config = {"client_id": "cid", "resource": falsy_resource}
+
+        db = Mock(spec=Session)
+
+        from mcpgateway.routers.oauth_router import _persist_learned_audience
+
+        await _persist_learned_audience(gateway, oauth_result, db)
+
+        db.flush.assert_called_once()
+        assert gateway.oauth_config["resource"] == "fresh-client-id"
 
 
 class TestOAuthRouter:
@@ -279,8 +515,8 @@ class TestOAuthRouter:
             assert "incomplete" in str(exc_info.value.detail).lower()
 
     @pytest.mark.asyncio
-    async def test_initiate_oauth_flow_normalizes_resource_list(self, mock_db, mock_request, mock_current_user):
-        """Test that resource list is normalized and invalid entries removed."""
+    async def test_initiate_oauth_flow_uses_persisted_resource_as_is(self, mock_db, mock_request, mock_current_user):
+        """Test that a persisted resource (learned from IdP aud) is used as-is."""
         mock_gateway = Mock(spec=Gateway)
         mock_gateway.id = "gateway123"
         mock_gateway.name = "Test Gateway"
@@ -294,7 +530,7 @@ class TestOAuthRouter:
             "authorization_url": "https://auth.example.com/authorize",
             "token_url": "https://auth.example.com/token",
             "redirect_uri": "https://gateway.example.com/oauth/callback",
-            "resource": ["https://api.example.com/path?x=1#frag", "invalid-resource"],
+            "resource": "my-client-id-from-idp",
         }
         mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
 
@@ -311,11 +547,11 @@ class TestOAuthRouter:
                 await initiate_oauth_flow("gateway123", mock_request, mock_current_user, mock_db)
 
         oauth_config_passed = mock_oauth_manager.initiate_authorization_code_flow.call_args[0][1]
-        assert oauth_config_passed["resource"] == ["https://api.example.com/path?x=1"]
+        assert oauth_config_passed["resource"] == "my-client-id-from-idp"
 
     @pytest.mark.asyncio
-    async def test_initiate_oauth_flow_resource_string_normalized(self, mock_db, mock_request, mock_current_user):
-        """Test that resource string is normalized preserving query."""
+    async def test_initiate_oauth_flow_resource_list_persisted_as_is(self, mock_db, mock_request, mock_current_user):
+        """Test that a persisted resource list (learned from IdP aud array) is used as-is."""
         mock_gateway = Mock(spec=Gateway)
         mock_gateway.id = "gateway123"
         mock_gateway.name = "Test Gateway"
@@ -329,7 +565,7 @@ class TestOAuthRouter:
             "authorization_url": "https://auth.example.com/authorize",
             "token_url": "https://auth.example.com/token",
             "redirect_uri": "https://gateway.example.com/oauth/callback",
-            "resource": "https://api.example.com/path?x=1#frag",
+            "resource": ["https://api.example.com", "my-client-id"],
         }
         mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
 
@@ -346,7 +582,7 @@ class TestOAuthRouter:
                 await initiate_oauth_flow("gateway123", mock_request, mock_current_user, mock_db)
 
         oauth_config_passed = mock_oauth_manager.initiate_authorization_code_flow.call_args[0][1]
-        assert oauth_config_passed["resource"] == "https://api.example.com/path?x=1"
+        assert oauth_config_passed["resource"] == ["https://api.example.com", "my-client-id"]
 
     @pytest.mark.asyncio
     async def test_initiate_oauth_flow_missing_client_id(self, mock_db, mock_request, mock_current_user):
@@ -447,7 +683,7 @@ class TestOAuthRouter:
 
         mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
 
-        token_result = {"user_id": "oauth_user_123", "app_user_email": "test@example.com", "expires_at": "2024-01-01T12:00:00"}
+        token_result = {"user_id": "oauth_user_123", "app_user_email": "test@example.com", "expires_at": "2024-01-01T12:00:00", "token_aud": None}
 
         with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_manager_class:
             mock_oauth_manager = Mock()
@@ -473,8 +709,8 @@ class TestOAuthRouter:
                 assert oauth_config_passed["resource"] == "https://mcp.example.com"  # Normalized URL
 
     @pytest.mark.asyncio
-    async def test_oauth_callback_resource_string_normalized(self, mock_db, mock_request):
-        """Test OAuth callback normalizes string resource value."""
+    async def test_oauth_callback_resource_string_persisted_as_is(self, mock_db, mock_request):
+        """Test OAuth callback uses persisted resource as-is (learned from IdP aud)."""
         import base64
         import json
 
@@ -494,11 +730,11 @@ class TestOAuthRouter:
             "authorization_url": "https://auth.example.com/authorize",
             "token_url": "https://auth.example.com/token",
             "redirect_uri": "https://gateway.example.com/oauth/callback",
-            "resource": "https://api.example.com/path?x=1#frag",
+            "resource": "my-client-id-from-idp",
         }
         mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
 
-        token_result = {"user_id": "oauth_user_123", "app_user_email": "test@example.com", "expires_at": "2024-01-01T12:00:00"}
+        token_result = {"user_id": "oauth_user_123", "app_user_email": "test@example.com", "expires_at": "2024-01-01T12:00:00", "token_aud": None}
 
         with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_manager_class:
             mock_oauth_manager = Mock()
@@ -513,7 +749,7 @@ class TestOAuthRouter:
 
         assert isinstance(result, HTMLResponse)
         oauth_config_passed = mock_oauth_manager.complete_authorization_code_flow.call_args[0][3]
-        assert oauth_config_passed["resource"] == "https://api.example.com/path?x=1"
+        assert oauth_config_passed["resource"] == "my-client-id-from-idp"
 
     @pytest.mark.asyncio
     async def test_oauth_callback_legacy_state_format(self, mock_db, mock_request, mock_gateway):
@@ -595,6 +831,17 @@ class TestOAuthRouter:
         assert isinstance(result, HTMLResponse)
         assert result.status_code == 400
         assert "Missing authorization code" in result.body.decode()
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_missing_state_returns_invalid_state(self, mock_db, mock_request):
+        """Missing state should return controlled invalid-state response."""
+        from mcpgateway.routers.oauth_router import oauth_callback
+
+        result = await oauth_callback(code="auth_code_123", state=None, request=mock_request, db=mock_db)
+
+        assert isinstance(result, HTMLResponse)
+        assert result.status_code == 400
+        assert "Invalid OAuth state parameter" in result.body.decode()
 
     @pytest.mark.asyncio
     async def test_oauth_callback_invalid_state(self, mock_db, mock_request):
@@ -1396,7 +1643,8 @@ class TestOAuthRouterAdditionalCoverage:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_initiate_oauth_flow_invalid_resource_list(self, mock_db, mock_request, mock_current_user):
+    async def test_initiate_oauth_flow_resource_list_used_as_is(self, mock_db, mock_request, mock_current_user):
+        """Resource lists (learned from IdP aud arrays) are passed through unchanged."""
         mock_gateway = Mock(spec=Gateway)
         mock_gateway.id = "gateway123"
         mock_gateway.name = "Gateway"
@@ -1422,11 +1670,11 @@ class TestOAuthRouterAdditionalCoverage:
             with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
                 from mcpgateway.routers.oauth_router import initiate_oauth_flow
 
-                with patch("mcpgateway.routers.oauth_router.logger") as mock_logger:
-                    result = await initiate_oauth_flow("gateway123", mock_request, mock_current_user, mock_db)
+                result = await initiate_oauth_flow("gateway123", mock_request, mock_current_user, mock_db)
 
         assert isinstance(result, RedirectResponse)
-        mock_logger.warning.assert_called()
+        oauth_config_passed = mock_mgr.initiate_authorization_code_flow.call_args[0][1]
+        assert oauth_config_passed["resource"] == ["not-a-url"]
 
     @pytest.mark.asyncio
     async def test_initiate_oauth_flow_dcr_decrypts_secret(self, mock_db, mock_request, mock_current_user):
@@ -1520,7 +1768,8 @@ class TestOAuthRouterAdditionalCoverage:
         assert response.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_oauth_callback_invalid_resource_list(self, mock_db, mock_request):
+    async def test_oauth_callback_resource_list_used_as_is(self, mock_db, mock_request):
+        """Resource lists (learned from IdP aud arrays) are passed through unchanged in callback."""
         import base64
         import orjson
 
@@ -1550,11 +1799,11 @@ class TestOAuthRouterAdditionalCoverage:
             with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
                 from mcpgateway.routers.oauth_router import oauth_callback
 
-                with patch("mcpgateway.routers.oauth_router.logger") as mock_logger:
-                    response = await oauth_callback(code="code", state=state, request=mock_request, db=mock_db)
+                response = await oauth_callback(code="code", state=state, request=mock_request, db=mock_db)
 
         assert response.status_code == 200
-        mock_logger.warning.assert_called()
+        oauth_config_passed = mock_mgr.complete_authorization_code_flow.call_args[0][3]
+        assert oauth_config_passed["resource"] == ["not-a-url"]
 
     @pytest.mark.asyncio
     async def test_initiate_oauth_flow_dcr_error(self, mock_db, mock_request, mock_current_user):
@@ -1875,3 +2124,250 @@ class TestOAuthRouterAdditionalCoverage:
         assert "gw'\"<script>" not in body
         # The escaped form should be present
         assert "gw&#x27;&quot;&lt;script&gt;" in body
+
+
+class TestOAuthCallbackCSPCompliance:
+    """Test CSP nonce support in OAuth callback success page.
+
+    Regression guard for PR #4424 and #4673 CSP implementation.
+    Ensures the OAuth callback page properly includes CSP nonce in inline scripts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_success_includes_csp_nonce_in_script_tag(self, mock_db, mock_request):
+        """Verify OAuth callback success page includes CSP nonce in inline script tag.
+
+        This is the critical test that exercises the actual /oauth/callback endpoint
+        and verifies the CSP nonce is properly applied to the inline script.
+        """
+        # Setup: Create gateway with OAuth config
+        mock_gateway = Mock(spec=Gateway)
+        mock_gateway.id = "test-gateway-123"
+        mock_gateway.name = "Test OAuth Gateway"
+        mock_gateway.url = "https://mcp.example.com"
+        mock_gateway.oauth_config = {
+            "grant_type": "authorization_code",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "authorization_url": "https://oauth.example.com/authorize",
+            "token_url": "https://oauth.example.com/token",
+            "redirect_uri": "http://localhost:4444/oauth/callback",
+        }
+        mock_gateway.ca_certificate = None
+        mock_gateway.client_cert = None
+        mock_gateway.client_key = None
+
+        mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+
+        # Mock OAuth manager to return successful result
+        oauth_result = {
+            "user_id": "user@example.com",
+            "expires_at": "2026-12-31T23:59:59Z",
+            "token_aud": None,
+        }
+
+        # Add CSP nonce to request state (simulating SecurityHeadersMiddleware)
+        mock_request.state.csp_nonce = "test-nonce-abc123xyz"
+
+        with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
+            mock_mgr = Mock()
+            mock_mgr.resolve_gateway_id_from_state = AsyncMock(return_value="test-gateway-123")
+            mock_mgr.complete_authorization_code_flow = AsyncMock(return_value=oauth_result)
+            mock_oauth_mgr.return_value = mock_mgr
+
+            with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+                from mcpgateway.routers.oauth_router import oauth_callback
+
+                result = await oauth_callback(
+                    code="test-auth-code",
+                    state="test-state-token",
+                    request=mock_request,
+                    db=mock_db
+                )
+
+        # Verify response is HTML
+        assert isinstance(result, HTMLResponse)
+        assert result.status_code == 200
+
+        # Decode response body
+        body = result.body.decode()
+
+        # Critical assertion: Verify CSP nonce is present in script tag
+        assert '<script nonce="test-nonce-abc123xyz">' in body, \
+            "OAuth callback page must include CSP nonce in inline script tag"
+
+        # Verify no inline onclick handlers (CSP violation)
+        assert 'onclick=' not in body, \
+            "OAuth callback page must not use inline onclick handlers (CSP violation)"
+
+        # Verify addEventListener pattern is used instead
+        assert 'addEventListener' in body, \
+            "OAuth callback page must use addEventListener for CSP compliance"
+
+        # Verify IIFE wrapper for proper scoping
+        assert '(function()' in body or '(function ()' in body, \
+            "OAuth callback page script should use IIFE for proper scoping"
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_success_handles_missing_csp_nonce_gracefully(self, mock_db, mock_request):
+        """Verify OAuth callback works even if CSP nonce is missing (fallback behavior)."""
+        # Setup: Create gateway with OAuth config
+        mock_gateway = Mock(spec=Gateway)
+        mock_gateway.id = "test-gateway-456"
+        mock_gateway.name = "Test Gateway"
+        mock_gateway.url = "https://mcp.example.com"
+        mock_gateway.oauth_config = {
+            "grant_type": "authorization_code",
+            "client_id": "test-client",
+            "token_url": "https://oauth.example.com/token",
+        }
+        mock_gateway.ca_certificate = None
+        mock_gateway.client_cert = None
+        mock_gateway.client_key = None
+
+        mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+
+        oauth_result = {
+            "user_id": "user@example.com",
+            "expires_at": "2026-12-31T23:59:59Z",
+            "token_aud": None,
+        }
+
+        # Simulate missing CSP nonce (request.state.csp_nonce not set)
+        # This tests the fallback behavior in get_csp_nonce_from_request
+        if hasattr(mock_request.state, 'csp_nonce'):
+            delattr(mock_request.state, 'csp_nonce')
+
+        with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
+            mock_mgr = Mock()
+            mock_mgr.resolve_gateway_id_from_state = AsyncMock(return_value="test-gateway-456")
+            mock_mgr.complete_authorization_code_flow = AsyncMock(return_value=oauth_result)
+            mock_oauth_mgr.return_value = mock_mgr
+
+            with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+                from mcpgateway.routers.oauth_router import oauth_callback
+
+                result = await oauth_callback(
+                    code="test-auth-code",
+                    state="test-state-token",
+                    request=mock_request,
+                    db=mock_db
+                )
+
+        # Verify response is still valid HTML
+        assert isinstance(result, HTMLResponse)
+        assert result.status_code == 200
+
+        body = result.body.decode()
+
+        # When nonce is missing, get_csp_nonce_from_request returns empty string
+        # The script tag should still be present but with empty nonce attribute
+        assert '<script nonce="">' in body, \
+            "OAuth callback should handle missing CSP nonce gracefully with empty nonce attribute"
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_error_pages_do_not_include_inline_scripts(self, mock_db, mock_request):
+        """Verify OAuth callback error pages don't have inline scripts (no CSP concerns)."""
+        from mcpgateway.routers.oauth_router import oauth_callback
+
+        # Test error callback (provider returned error)
+        result = await oauth_callback(
+            code=None,
+            state="test-state",
+            error="access_denied",
+            error_description="User denied access",
+            request=mock_request,
+            db=mock_db
+        )
+
+        assert isinstance(result, HTMLResponse)
+        assert result.status_code == 400
+        body = result.body.decode()
+
+        # Error pages should not have inline scripts
+        assert '<script' not in body, \
+            "OAuth error pages should not contain inline scripts"
+
+        # Test missing code error
+        result = await oauth_callback(
+            code=None,
+            state="test-state",
+            request=mock_request,
+            db=mock_db
+        )
+
+        assert isinstance(result, HTMLResponse)
+        assert result.status_code == 400
+        body = result.body.decode()
+        assert '<script' not in body
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_csp_nonce_uniqueness_per_request(self, mock_db):
+        """Verify each OAuth callback request gets a unique CSP nonce.
+
+        This test simulates multiple requests to ensure nonces are unique,
+        preventing nonce reuse attacks.
+        """
+        # Setup gateway
+        mock_gateway = Mock(spec=Gateway)
+        mock_gateway.id = "test-gateway-789"
+        mock_gateway.name = "Test Gateway"
+        mock_gateway.url = "https://mcp.example.com"
+        mock_gateway.oauth_config = {
+            "grant_type": "authorization_code",
+            "client_id": "test-client",
+            "token_url": "https://oauth.example.com/token",
+        }
+        mock_gateway.ca_certificate = None
+        mock_gateway.client_cert = None
+        mock_gateway.client_key = None
+
+        mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+
+        oauth_result = {
+            "user_id": "user@example.com",
+            "expires_at": "2026-12-31T23:59:59Z",
+            "token_aud": None,
+        }
+
+        nonces_seen = set()
+
+        # Simulate 3 different requests
+        for i in range(3):
+            mock_request = Mock(spec=Request)
+            mock_request.url = Mock()
+            mock_request.url.scheme = "https"
+            mock_request.url.netloc = "gateway.example.com"
+            mock_request.scope = {"root_path": ""}
+            mock_request.state = SimpleNamespace()
+            mock_request.state.csp_nonce = f"unique-nonce-{i}-abc123xyz"
+
+            with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
+                mock_mgr = Mock()
+                mock_mgr.resolve_gateway_id_from_state = AsyncMock(return_value="test-gateway-789")
+                mock_mgr.complete_authorization_code_flow = AsyncMock(return_value=oauth_result)
+                mock_oauth_mgr.return_value = mock_mgr
+
+                with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+                    from mcpgateway.routers.oauth_router import oauth_callback
+
+                    result = await oauth_callback(
+                        code="test-auth-code",
+                        state="test-state-token",
+                        request=mock_request,
+                        db=mock_db
+                    )
+
+            body = result.body.decode()
+
+            # Extract nonce from script tag
+            import re
+            nonce_match = re.search(r'<script nonce="([^"]+)">', body)
+            assert nonce_match, f"Request {i}: CSP nonce not found in script tag"
+
+            nonce = nonce_match.group(1)
+            assert nonce not in nonces_seen, f"Request {i}: Nonce {nonce} was reused (security violation)"
+            nonces_seen.add(nonce)
+
+        # Verify we collected 3 unique nonces
+        assert len(nonces_seen) == 3, "Each request should have a unique CSP nonce"

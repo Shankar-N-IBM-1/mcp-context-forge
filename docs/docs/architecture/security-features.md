@@ -102,7 +102,7 @@ For production deployments, always include JTI in issued tokens to enable proper
 - **TLS ready.** `make certs` creates local certificates, `make serve-ssl` runs Gunicorn with TLS, and the client defaults keep `SKIP_SSL_VERIFY=false`. The container images trust RHEL certificate bundles for outbound TLS.
 - **Support bundle sanitisation.** `SupportBundleService` redacts passwords, tokens, secrets, and bearer values before writing diagnostic ZIPs. Patterns cover API keys, JWTs, Authorization headers, and database URLs.
 - **Configuration masking.** `/admin/config/settings` hides sensitive keys using the `mask_sensitive` helper to prevent secret exfiltration through the Admin UI/API.
-- **Hardened containers.** `Containerfile.lite` builds on patched RHEL UBI 10 ↦ scratch, installs dependencies in a venv, strips debugging symbols, removes package managers, deletes setuid/setgid binaries, creates a non-root `UID 1001`, preserves the RPM DB for scanning, and sets security-oriented runtime env vars.
+- **Hardened containers.** `Containerfile.lite` builds on patched RHEL UBI 10 ↦ scratch, installs dependencies in a venv, strips debugging symbols, removes package managers, deletes setuid/setgid binaries, creates a non-root `UID 10001` (>10000 to avoid host conflicts), preserves the RPM DB for scanning, and sets security-oriented runtime env vars.
 - **Logging controls.** `LoggingService` centralises formatting with JSON or text output, supports log rotation, and the support bundle honours size/line caps to avoid log leakage.
 
 ## Input Validation & Guardrails
@@ -117,7 +117,7 @@ For production deployments, always include JTI in issued tokens to enable proper
 ## Content Security & Resource Protection
 
 - **Content size limits.** `ContentSecurityService` enforces configurable size limits for resources (`CONTENT_MAX_RESOURCE_SIZE`, default 100KB) and prompts (`CONTENT_MAX_PROMPT_SIZE`, default 10KB) to prevent memory exhaustion and DoS attacks. Violations return HTTP 413 (Payload Too Large) with detailed size information.
-- **MIME type validation.** Resource MIME types are validated against a configurable allowlist (`CONTENT_ALLOWED_RESOURCE_MIMETYPES`) to prevent malicious content injection. In strict mode, only types explicitly listed in the allowlist are accepted — vendor types (`application/x-*`, `text/x-*`) and structured-syntax suffix types (e.g., `application/vnd.api+json`) must be added explicitly if needed. Violations return HTTP 415 (Unsupported Media Type).
+- **MIME type validation.** Resource MIME types are validated against a configurable allowlist (`CONTENT_ALLOWED_RESOURCE_MIMETYPES`) to prevent malicious content injection. Vendor types (`application/x-*`, `text/x-*`) and structured-syntax suffix types (e.g., `application/vnd.api+json`) are automatically permitted. Violations return HTTP 415 (Unsupported Media Type).
 - **Feature flag for safe migration.** `CONTENT_STRICT_MIME_VALIDATION` enables log-only mode (default `false`) where MIME type violations are logged but not blocked, allowing gradual rollout and monitoring before enforcement.
 - **Prometheus metrics.** Content security violations are tracked via `content_size_violations_total` (labeled by `content_type`: resource/prompt) and `content_type_violations_total` (labeled by `content_type` and `mime_type`) for monitoring and alerting.
 - **PII-safe audit logging.** All content security events log sanitized user context (SHA256-hashed email, masked IP addresses) to enable security investigations while protecting privacy.

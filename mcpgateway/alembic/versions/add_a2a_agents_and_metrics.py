@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/alembic/versions/add_a2a_agents_and_metrics.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -83,7 +83,8 @@ def upgrade() -> None:
         )
 
     # Only create association table if both referenced tables exist
-    if "server_a2a_association" not in existing_tables and "servers" in existing_tables and "a2a_agents" in existing_tables:
+    # Note: a2a_agents was just created above, so we check if servers exists
+    if "server_a2a_association" not in existing_tables and "servers" in existing_tables:
         # Create server_a2a_association table
         op.create_table(
             "server_a2a_association",

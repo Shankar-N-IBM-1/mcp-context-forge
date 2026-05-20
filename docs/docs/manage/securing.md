@@ -385,9 +385,9 @@ MCP Gateway implements Subresource Integrity for all external CDN resources to c
 - **DNS Hijacking**: Redirection to malicious CDN servers
 - **Version Drift**: Unexpected changes to CDN content
 
-**Protected Resources** (15 total):
+**Protected Resources** (14 total):
 
-- HTMX (1.9.10) - Dynamic interactions
+- HTMX (2.0.3) - Dynamic interactions (bundled via npm/Vite)
 - Alpine.js (3.14.1) - Reactive framework
 - Chart.js (4.4.1) - Data visualization
 - Marked (11.1.1) - Markdown parser
@@ -425,7 +425,11 @@ The CI pipeline automatically verifies SRI hashes on every build to detect unexp
 - [x] Hashes use SHA-384 algorithm (W3C recommended)
 - [ ] Review SRI hashes after any CDN library updates
 
-### 9. Content Size Limits
+### 9. Content Security Framework
+
+ContextForge implements a comprehensive 6-layer content security framework to protect against malicious content in user-submitted resources and prompts:
+
+#### Layer 1: Size Validation
 
 Configure content size limits to prevent DoS via oversized resource or prompt submissions:
 
@@ -438,13 +442,189 @@ CONTENT_MAX_PROMPT_SIZE=10240     # 10KB for prompt templates (range: 512B–1MB
 - [ ] Review default size limits for your use case
 - [ ] Monitor 413 responses in logs for legitimate content being blocked
 
+#### Layer 2: PII-Safe Logging
+
+User identifiers are automatically sanitized before being written to audit logs:
+
+- **Email addresses**: Hashed to an 8-character SHA-256 prefix
+- **IP addresses**: Last octet masked (e.g., `192.168.1.xxx`)
+
+This ensures that security event logs contain enough information for debugging and correlation without exposing raw PII. No additional configuration is required.
+
+#### Layer 3: Malicious Pattern Detection
+
+Detect and block common attack patterns including XSS, template injection, command injection, and SQL injection:
+
+```bash
+# Enable pattern detection (enabled by default)
+CONTENT_PATTERN_DETECTION_ENABLED=true
+
+# Configure validation mode
+CONTENT_PATTERN_VALIDATION_MODE=strict  # Options: strict, moderate, lenient
+
+# Enable pattern caching for performance (recommended)
+CONTENT_PATTERN_CACHE_ENABLED=true
+CONTENT_PATTERN_MAX_CACHE_SIZE=1000
+
+# Custom blocked patterns (JSON array of regex patterns)
+# CONTENT_BLOCKED_PATTERNS='["custom_pattern_1", "custom_pattern_2"]'
+```
+
+**Pattern Detection Behavior:**
+
+The system scans all content for malicious patterns. Specific high-risk template patterns
+(such as `{{ config }}` and `${...}`) are blocked globally, while generic template
+variables (such as `{{ user.name }}`) are not blocked. Prompt templates are additionally
+validated for balanced braces and Jinja2 syntax safety.
+
+| Pattern Type | Blocked Globally | Notes |
+|--------------|-----------------|-------|
+| XSS (`<script>`, `javascript:`) | ❌ **BLOCKED** | Always dangerous |
+| Command injection (`&&`, `` ` ``) | ❌ **BLOCKED** | Always dangerous |
+| SQL injection (`union`, `--`) | ❌ **BLOCKED** | Always dangerous |
+| High-risk template (`{{ config }}`, `${...}`) | ❌ **BLOCKED** | Blocks config access and expression evaluation |
+| Generic template variables (`{{ var }}`) | ✅ **ALLOWED** | Legitimate in prompts and resources |
+
+**Example - Legitimate Prompt Template:**
+```python
+# ✅ This is ALLOWED
+template = "Hello {{ user.name }}, welcome to {{ company }}!"
+```
+
+**Example - Potential SSTI Attack:**
+```python
+# ❌ This is BLOCKED
+content = "Data: {{ config.secret_key }}"  # Potential server-side template injection
+```
+
+**Default Attack Patterns:**
+
+1. **XSS Attacks** (4 patterns) - **Always blocked**:
+   - Script tag injection: `<script[^>]*>.*?</script>`
+   - Event handler injection: `on\w+\s*=`
+   - JavaScript protocol: `javascript:`
+   - Iframe injection: `<iframe[^>]*>`
+
+2. **Command Injection** (4 patterns) - **Always blocked**:
+   - Dangerous rm command: `;\s*rm\s+-rf`
+   - Command chaining: `&&|\|\|`
+   - Backtick execution: `` `[^`]+` ``
+   - Command substitution: `\$\([^)]+\)`
+
+3. **SQL Injection** (3 patterns) - **Always blocked**:
+   - SQL keywords: `(?i)(union|select|insert|update|delete|drop)\s+`
+   - Comment injection: `--\s*$`
+   - Classic injection: `'\s*or\s*'1'\s*=\s*'1`
+
+4. **Template Injection** (4 patterns) - **High-risk patterns only**:
+   - Jinja2 config object access: `\{\{\s*config\s*\}\}`
+   - Jinja2 config attribute access: `\{\{\s*config\.`
+   - Jinja2 config loops: `\{%\s*for\s+\w+\s+in\s+config`
+   - Expression evaluation: `\$\{.*\}`
+
+**Validation Modes:**
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `strict` | Block high-risk patterns | Production (recommended) |
+| `moderate` | Same as strict | Production |
+| `lenient` | Log only, don't block | Monitoring, testing |
+
+**Note**: Both `strict` and `moderate` modes block the same set of high-risk patterns. The distinction is maintained for future enhancements.
+
+**Performance Optimization:**
+
+- **Pattern Caching**: Compiled regex patterns are reused and successful clean validation results are cached for repeated content
+- **Cache Size**: Default 1000 clean validation results, configurable via `CONTENT_PATTERN_MAX_CACHE_SIZE`
+- **Startup Compilation**: Patterns compile once when the content security service initializes
+- **Thread-Safe**: Cache uses threading locks for concurrent access
+
+**Security Checklist:**
+
+- [ ] Enable pattern detection in production (`CONTENT_PATTERN_DETECTION_ENABLED=true`)
+- [ ] Use `strict` mode for production workloads
+- [ ] Enable pattern caching for performance
+- [ ] Monitor pattern violation logs for false positives
+- [ ] Review custom patterns for your specific use case
+- [ ] Test legitimate content doesn't trigger false positives
+- [ ] Configure appropriate validation mode per environment
+
+#### Layer 4: Content Sanitization
+
+HTML and markdown content is sanitized using DOMPurify (client-side) and bleach (server-side):
+
+- Removes dangerous HTML tags and attributes
+- Preserves safe formatting elements
+- Prevents XSS via DOM manipulation
+
+#### Layer 5: Output Encoding
+
+All content is properly encoded for the output context:
+
+- HTML entity encoding for web display
+- JSON escaping for API responses
+- SQL parameterization for database queries
+
+#### Layer 6: Content Security Policy (CSP)
+
+Strict CSP headers prevent inline script execution:
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net unpkg.com; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net
+```
+
+**Defense in Depth:**
+
+The 6-layer approach ensures that even if one layer is bypassed, other layers provide protection. For example:
+
+1. Size limits prevent DoS before content is processed
+2. PII-safe logging prevents sensitive data exposure in audit trails
+3. Pattern detection catches attack attempts
+4. Sanitization removes dangerous elements
+5. Output encoding prevents injection
+6. CSP blocks execution even if content is injected
+
+**Monitoring and Logging:**
+
+All content security violations are logged with:
+
+- Violation type (size, pattern, etc.)
+- Sanitized user identifier (email hashed, IP masked)
+- Timestamp and correlation ID
+- Attack classification (XSS, SQLi, etc.)
+- Validation mode and action taken
+
+**Example Log Entry:**
+
+```json
+{
+  "timestamp": "2026-03-27T12:00:00Z",
+  "level": "WARNING",
+  "message": "Content pattern violation detected",
+  "user_hash": "a1b2c3d4",
+  "violation_type": "xss_script_tag",
+  "validation_mode": "strict",
+  "action": "blocked",
+  "correlation_id": "abc123"
+}
+```
+
+**Integration Points:**
+
+Content security is enforced at the service layer:
+
+- `resource_service.py`: `register_resource()`, `update_resource()`, `register_resources_bulk()`
+- `prompt_service.py`: `register_prompt()`, `update_prompt()`, `register_prompts_bulk()`
+
+All 6 methods validate content before database persistence.
+
 ### 10. Container Security
 
 ```bash
 # Run containers with security constraints
 docker run \
   --read-only \
-  --user 1001:1001 \
+  --user 10001:10001 \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   mcpgateway:latest

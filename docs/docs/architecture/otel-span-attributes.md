@@ -2,6 +2,65 @@
 
 This document lists all span attributes created in the ContextForge codebase, organized by category with real-world code-level examples.
 
+## **CUSTOMIZING SPAN ATTRIBUTES**
+
+ContextForge provides the **SpanAttributeCustomizer** plugin to customize OpenTelemetry span attributes at runtime. This allows you to:
+
+- **Add global attributes** to all spans (e.g., environment, region, team)
+- **Override attributes per tool** for specific tools
+- **Transform attribute values** (hash for PII, uppercase, lowercase, truncate)
+- **Add conditional attributes** based on tool name or context
+- **Remove sensitive attributes** for privacy/compliance
+- **Control baggage span attribute names** with an allowlist and optional `baggage.` prefix removal
+
+### Setup
+
+1. Enable the plugin in `plugins/config.yaml`:
+
+```yaml
+plugins:
+  - name: "SpanAttributeCustomizer"
+    kind: "plugins.span_attribute_customizer.span_attribute_customizer.SpanAttributeCustomizerPlugin"
+    hooks: ["tool_pre_invoke", "tool_post_invoke", "resource_pre_fetch", "resource_post_fetch"]
+    mode: "permissive"
+    priority: 10
+    config:
+      global_attributes:
+        environment: "production"
+        region: "us-east-1"
+        team: "platform"
+      tool_overrides:
+        weather_api:
+          attributes:
+            service: "weather"
+            cost_center: "engineering"
+      transformations:
+        - field: "user.email"
+          operation: "hash"
+      conditions:
+        - when: "tool.name == \"sensitive_operation\""
+          add:
+            audit_required: true
+            compliance_level: "high"
+      remove_attributes:
+        - "internal_debug_info"
+      allowed_baggage_span_attributes:
+        - "tenant.id"
+        - "user.id"
+      emit_baggage_prefixed_attributes: false
+```
+
+2. Enable plugins in `.env`:
+
+```bash
+PLUGINS_ENABLED=true
+PLUGINS_CONFIG_FILE=plugins/config.yaml
+```
+
+3. Restart the gateway
+
+For detailed configuration options, see `plugins/span_attribute_customizer/README.md`.
+
 ---
 
 ## **TOOL INVOCATION ATTRIBUTES**
@@ -295,9 +354,10 @@ This document lists all span attributes created in the ContextForge codebase, or
 
 ### Baggage Attributes
 
-| Attribute       | Example Value               | Description                |
-| --------------- | --------------------------- | -------------------------- |
-| `baggage.{key}` | `baggage.trace_id="abc123"` | Baggage entries (prefixed) |
+| Attribute | Example Value | Description |
+| --------- | ------------- | ----------- |
+| `baggage.{key}` | `baggage.trace_id="abc123"` | Default baggage span attributes |
+| `{key}` | `tenant.id="tenant-123"` | Baggage span attributes when SpanAttributeCustomizer disables the `baggage.` prefix for allowlisted keys |
 
 ---
 
@@ -401,7 +461,7 @@ This document lists all span attributes created in the ContextForge codebase, or
 
 ### Request Context (5 attributes)
 
-- `correlation_id`, `request_id`, `server_id`, `tenant_id`, `baggage.{key}`
+- `correlation_id`, `request_id`, `server_id`, `tenant_id`, `baggage.{key}` or allowlisted unprefixed baggage keys such as `tenant.id`
 
 ### HTTP (11 attributes)
 

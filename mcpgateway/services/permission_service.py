@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/services/permission_service.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -432,6 +432,30 @@ class PermissionService:
         user_permissions = await self.get_user_permissions(user_email, token_teams=token_teams)
         return any(perm in user_permissions for perm in admin_permissions)
 
+    async def check_platform_admin_permission(self, user_email: str, token_teams: Optional[List[str]] = None) -> bool:
+        """Check if user has platform-admin privileges (DB flag or global * role).
+
+        Public-only tokens (token_teams=[]) suppress admin bypass.
+
+        Args:
+            user_email: Email of the user
+            token_teams: Optional list of team IDs to scope the permission check (Layer 1 narrowing)
+
+        Returns:
+            bool: True if user is a platform admin
+        """
+        # SECURITY: Public-only tokens suppress admin bypass
+        if token_teams is not None and len(token_teams) == 0:
+            return False
+
+        # First check if user is admin (handles DB is_admin and platform_admin_email)
+        if await self._is_user_admin(user_email):
+            return True
+
+        # Check for global platform_admin role (indicated by '*' permission)
+        global_perms = await self.get_user_permissions(user_email, token_teams=token_teams)
+        return "*" in global_perms
+
     def clear_user_cache(self, user_email: str) -> None:
         """Clear cached permissions for a user.
 
@@ -652,7 +676,14 @@ class PermissionService:
         return age.total_seconds() < self.cache_ttl
 
     async def _is_user_admin(self, user_email: str) -> bool:
-        """Check if user is admin by looking up user record directly.
+        """Check if user is admin for RBAC permission evaluation.
+
+        Delegates to the single shared helper in
+        :mod:`mcpgateway.utils.admin_check` to keep Layer 1 (visibility)
+        and Layer 2 (RBAC) consistent.  The shared helper is fail-closed
+        on DB errors and uses ``user.is_admin is True`` (strict) rather
+        than a truthy check, which avoids MagicMock-spec pitfalls in
+        tests.
 
         Args:
             user_email: Email address of the user
@@ -661,14 +692,9 @@ class PermissionService:
             bool: True if user is admin
         """
         # First-Party
-        from mcpgateway.db import EmailUser  # pylint: disable=import-outside-toplevel
+        from mcpgateway.utils.admin_check import is_user_admin  # pylint: disable=import-outside-toplevel
 
-        # Special case for platform admin (virtual user)
-        if user_email == getattr(settings, "platform_admin_email", ""):
-            return True
-
-        user = self.db.execute(select(EmailUser).where(EmailUser.email == user_email)).scalar_one_or_none()
-        return bool(user and user.is_admin)
+        return is_user_admin(self.db, user_email)
 
     async def _check_team_fallback_permissions(self, user_email: str, permission: str, team_id: Optional[str]) -> bool:
         """Check fallback team permissions for users without explicit RBAC roles.

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""
+"""Location: ./mcpgateway/transports/redis_event_store.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
+
 Redis-backed event store for Streamable HTTP stateful sessions.
 
 Design goals:
@@ -8,9 +12,10 @@ Design goals:
 - Bounded index growth: event_id index entries expire with the stream TTL.
 """
 
-# Standard
+# Future
 from __future__ import annotations
 
+# Standard
 import logging
 from typing import AsyncIterator, Optional, TYPE_CHECKING
 import uuid

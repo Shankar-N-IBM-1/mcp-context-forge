@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/routers/runtime_admin_router.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
 
 Runtime-mode admin router.
 
@@ -31,19 +32,19 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 # First-Party
+from mcpgateway import version as version_module
 from mcpgateway.middleware.rbac import get_current_user_with_permissions, get_db, require_permission
 from mcpgateway.runtime_state import (
+    get_runtime_state,
+    get_runtime_state_coordinator,
     MoveCompatibility,
     OverrideMode,
     PublishStatus,
     RuntimeKind,
     RuntimeStateError,
-    get_runtime_state,
-    get_runtime_state_coordinator,
 )
 from mcpgateway.services.logging_service import LoggingService
 from mcpgateway.services.security_logger import get_security_logger
-from mcpgateway import version as version_module
 
 logging_service = LoggingService()
 logger = logging_service.get_logger(__name__)
@@ -211,9 +212,10 @@ async def _apply_mode_change(
     except RuntimeStateError as exc:
         # Refusing to allocate a colliding version is preferable to silently
         # losing one of two concurrent flips at peer dedup time.
+        logger.debug("Cannot safely allocate a runtime-mode version: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Cannot safely allocate a runtime-mode version: {exc}",
+            detail="Cannot safely allocate a runtime-mode version",
         ) from exc
 
     change = await state.apply_local(runtime, new_mode, initiator_user=user.get("email"), version=next_version)

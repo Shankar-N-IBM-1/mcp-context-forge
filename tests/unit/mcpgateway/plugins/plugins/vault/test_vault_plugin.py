@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./tests/unit/mcpgateway/plugins/plugins/vault/test_vault_plugin.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Adrian Popa
 
@@ -14,7 +14,7 @@ import json
 import pytest
 
 # First-Party
-from mcpgateway.plugins.framework import (
+from cpex.framework import (
     GlobalContext,
     HttpHeaderPayload,
     PluginConfig,
@@ -42,7 +42,7 @@ class TestVaultPluginFunctionality:
             version="1.0",
             hooks=[ToolHookType.TOOL_PRE_INVOKE],
             tags=["test", "vault"],
-            mode=PluginMode.ENFORCE,
+            mode=PluginMode.SEQUENTIAL,
             priority=10,
             config={
                 "system_tag_prefix": "system",

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/utils/verify_credentials.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -74,11 +74,143 @@ from mcpgateway.utils.paths import resolve_root_path
 from mcpgateway.utils.time_restrictions import validate_time_restrictions
 
 basic_security = HTTPBasic(auto_error=False)
-security = HTTPBearer(auto_error=False)
 
 # Initialize logging service first
 logging_service = LoggingService()
 logger = logging_service.get_logger(__name__)
+
+
+def _resolve_auth_header_name(settings_obj: Any | None = None) -> str:
+    """Return the configured auth header name, defensive against mocks/misconfig.
+
+    Falls back to ``"Authorization"`` when the setting is missing, not a
+    string, or empty/whitespace-only.
+
+    Args:
+        settings_obj: Optional settings override (defaults to the global settings).
+
+    Returns:
+        Resolved auth header name (always a non-empty string).
+    """
+    s = settings_obj or settings
+    name = getattr(s, "auth_header_name", "Authorization")
+    if not isinstance(name, str):
+        return "Authorization"
+    name = name.strip()
+    return name or "Authorization"
+
+
+def get_auth_header_value(headers: Any, settings_obj: Any | None = None) -> Optional[str]:
+    """Look up the configured auth header value (case-insensitive).
+
+    Tries the lowercase form first (matches Starlette's normalized
+    ``request.headers``) and falls back to the configured casing for
+    plain dicts and ASGI scope-style mappings.
+
+    Args:
+        headers: Headers mapping supporting ``.get(name)``.
+        settings_obj: Optional settings override (defaults to the global settings).
+
+    Returns:
+        Header value when present, otherwise ``None``.
+    """
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    header_name = _resolve_auth_header_name(settings_obj)
+    lower = header_name.lower()
+    val = headers.get(lower)
+    if val:
+        return val
+    if header_name != lower:
+        val = headers.get(header_name)
+        if val:
+            return val
+    return None
+
+
+def get_auth_bearer_token_from_request(request: Any) -> Optional[str]:
+    """Extract a Bearer token from the configured auth header on a request.
+
+    The Bearer scheme match is case-insensitive ("bearer" / "Bearer" / "BEARER").
+    Returns ``None`` when the header is missing, the scheme is not Bearer,
+    or the token is empty.
+
+    Args:
+        request: FastAPI/Starlette ``Request``-like object exposing ``.headers``.
+
+    Returns:
+        The bearer token string when present, otherwise ``None``.
+    """
+    if request is None or not hasattr(request, "headers"):
+        return None
+    auth_header = get_auth_header_value(request.headers)
+    if not auth_header:
+        return None
+    parts = auth_header.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+class ConfigurableHTTPBearer(HTTPBearer):
+    """HTTPBearer with a configurable header name.
+
+    Reads the auth header named by ``settings.auth_header_name`` (default
+    ``Authorization``). Header lookup is case-insensitive. Bearer scheme
+    match is case-insensitive. Subclasses ``HTTPBearer`` so OpenAPI security
+    metadata is preserved.
+    """
+
+    def __init__(self, *, scheme_name: Optional[str] = None, auto_error: bool = True):
+        """Initialize the configurable bearer authentication scheme.
+
+        Args:
+            scheme_name: Optional scheme name shown in OpenAPI docs.
+            auto_error: When ``True`` (default), raise 403 on missing or
+                malformed credentials; when ``False``, return ``None``.
+        """
+        super().__init__(scheme_name=scheme_name, auto_error=auto_error)
+
+    async def __call__(self, request: Request) -> Optional[HTTPAuthorizationCredentials]:
+        """Extract bearer credentials from the configured auth header.
+
+        Args:
+            request: Incoming FastAPI/Starlette ``Request``.
+
+        Returns:
+            ``HTTPAuthorizationCredentials`` when a Bearer token is found,
+            otherwise ``None`` (or raises 403 when ``auto_error`` is set).
+
+        Raises:
+            HTTPException: 403 when ``auto_error`` is enabled and credentials
+                are missing or use an unsupported scheme.
+        """
+        authorization = get_auth_header_value(request.headers)
+
+        if not authorization:
+            if self.auto_error:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not authenticated",
+                )
+            return None
+
+        scheme, _, credentials = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            if self.auto_error:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Invalid authentication credentials",
+                )
+            return None
+
+        return HTTPAuthorizationCredentials(scheme=scheme, credentials=credentials)
+
+
+# Default security dependency. Reads from the configured auth header so all
+# auth dependencies behave consistently when AUTH_HEADER_NAME is customized.
+security = ConfigurableHTTPBearer(auto_error=False)
 
 
 def is_proxy_auth_trust_active(settings_obj: Any | None = None) -> bool:
@@ -106,7 +238,7 @@ def is_proxy_auth_trust_active(settings_obj: Any | None = None) -> bool:
 
 
 def extract_websocket_bearer_token(query_params: Any, headers: Any, *, query_param_warning: Optional[str] = None) -> Optional[str]:
-    """Extract bearer token from WebSocket Authorization headers.
+    """Extract bearer token from WebSocket headers using configured auth header name.
 
     Args:
         query_params: WebSocket query parameters mapping-like object.
@@ -123,10 +255,7 @@ def extract_websocket_bearer_token(query_params: Any, headers: Any, *, query_par
     if legacy_token and query_param_warning:
         logger.warning(f"{query_param_warning}; token ignored")
 
-    header_values = headers or {}
-    auth_header = header_values.get("authorization") if hasattr(header_values, "get") else None
-    if not auth_header and hasattr(header_values, "get"):
-        auth_header = header_values.get("Authorization")
+    auth_header = get_auth_header_value(headers)
     if auth_header:
         scheme, _, credentials = auth_header.partition(" ")
         if scheme.lower() == "bearer" and credentials:
@@ -399,13 +528,120 @@ async def _enforce_revocation_and_active_user(payload: dict) -> None:
         _raise_auth_401("Account disabled")
 
 
+async def _authenticate_proxy_user(request: Request, proxy_user: str) -> dict:
+    """Authenticate a proxy-identified user and build an enriched auth payload.
+
+    Performs a DB lookup for the proxy-identified user, resolves their teams
+    and admin status via ``_resolve_teams_from_db``, caches the payload on
+    ``request.state._jwt_verified_payload``, and returns it.
+
+    Supports a platform-admin bootstrap flow: when
+    ``settings.require_user_in_db`` is ``False`` **and** the proxy header
+    matches ``settings.platform_admin_email``, an admin payload is returned
+    without requiring a DB record (same policy applied to JWTs in
+    ``_enforce_revocation_and_active_user``).
+
+    This helper is shared by :func:`require_auth` and
+    :func:`require_auth_header_first` so that proxy-authenticated callers get
+    the same enriched context regardless of the entry point (REST admin paths
+    vs MCP streamable HTTP transport).
+
+    Args:
+        request: FastAPI request used to cache the payload for downstream code.
+        proxy_user: The authenticated user identifier from the configured
+            proxy header (e.g. ``X-Authenticated-User``).
+
+    Returns:
+        dict: Enriched auth payload with keys ``sub``, ``source``, ``token``,
+        ``is_admin``, ``teams``, and ``email``. ``teams`` is ``None`` for
+        admin bypass, ``[]`` for public-only, or a list of team ID strings.
+
+    Raises:
+        HTTPException: 401 when the proxy-identified user is not present in
+            the DB and the platform-admin bootstrap conditions do not apply.
+    """
+    # First-Party
+    from mcpgateway.auth import _resolve_teams_from_db  # pylint: disable=import-outside-toplevel
+    from mcpgateway.db import get_db  # pylint: disable=import-outside-toplevel
+    from mcpgateway.services.email_auth_service import EmailAuthService  # pylint: disable=import-outside-toplevel
+
+    db = next(get_db())
+    try:
+        auth_service = EmailAuthService(db)
+        user_info = await auth_service.get_user_by_email(proxy_user)
+
+        if user_info:
+            # Enforce account-active check (matches the JWT path in _enforce_revocation_and_active_user:398-399).
+            # Without this, a disabled user - including a disabled admin - could authenticate via trusted-proxy
+            # mode and inherit their pre-disable authorizations.
+            if not user_info.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Account disabled",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            # Resolve teams from DB (returns None for admin bypass, [] for no teams, or list of team IDs)
+            token_teams = await _resolve_teams_from_db(proxy_user, user_info)
+            payload = {
+                "sub": proxy_user,
+                "source": "proxy",
+                "token": None,  # nosec B105 - None is not a password
+                "is_admin": user_info.is_admin,
+                "teams": token_teams,  # None for admin bypass, [] for public-only, or list of team IDs
+                "email": proxy_user,
+                # token_use: "session" signals DB-backed team resolution to downstream dispatchers
+                # (main.py:2870, streamablehttp_transport.py:1998) so they route via resolve_session_teams
+                # rather than treating the proxy payload as an API-token payload with embedded teams.
+                "token_use": "session",  # nosec B105 - Not a password; JWT claim type
+            }
+        else:
+            # User not in DB - handle based on REQUIRE_USER_IN_DB setting
+            platform_admin_email = getattr(settings, "platform_admin_email", "admin@example.com")
+            if not settings.require_user_in_db and proxy_user == platform_admin_email:
+                # Platform admin bootstrap (matches the JWT path in _enforce_revocation_and_active_user)
+                payload = {
+                    "sub": proxy_user,
+                    "source": "proxy",
+                    "token": None,  # nosec B105 - None is not a password
+                    "is_admin": True,
+                    "teams": None,  # Admin bypass
+                    "email": proxy_user,
+                    "token_use": "session",  # nosec B105 - Not a password; JWT claim type
+                }
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User not found in database",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        # Cache in request state for downstream use (same pattern as JWT tokens)
+        request.state._jwt_verified_payload = (None, payload)
+        return payload
+    finally:
+        db.close()
+
+
 async def require_auth(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security), jwt_token: Optional[str] = Cookie(default=None)) -> str | dict:
     """Require authentication via JWT token or proxy headers.
 
     FastAPI dependency that checks for authentication via:
-    1. Proxy headers (if mcp_client_auth_enabled=false and trust_proxy_auth=true)
+    1. Proxy headers (if mcp_client_auth_enabled=false and is_proxy_auth_trust_active())
     2. JWT token in Authorization header (Bearer scheme)
     3. JWT token in cookies
+
+    Proxy authentication path (see :func:`_authenticate_proxy_user`):
+        When configured, the proxy-supplied user identity is looked up in
+        the DB via ``EmailAuthService`` and their team/admin context is
+        resolved. The resulting enriched payload
+        (``sub``, ``source``, ``token``, ``is_admin``, ``teams``, ``email``)
+        is cached on ``request.state._jwt_verified_payload`` so downstream
+        middleware and handlers get the same shape used for JWT-authenticated
+        requests. When ``REQUIRE_USER_IN_DB=False`` and the proxy user matches
+        ``settings.platform_admin_email``, a platform-admin bootstrap payload
+        (``is_admin=True``, ``teams=None``) is returned without requiring a
+        DB record; otherwise an unknown proxy user raises 401.
 
     If authentication is required but no token is provided, raises an HTTP 401 error.
 
@@ -416,11 +652,13 @@ async def require_auth(request: Request, credentials: Optional[HTTPAuthorization
 
     Returns:
         str | dict: The verified credentials payload if authenticated,
-            proxy user if proxy auth enabled, or "anonymous" if authentication is not required.
+            the enriched proxy payload if proxy auth succeeded, or
+            ``"anonymous"`` if authentication is not required.
 
     Raises:
         HTTPException: 401 status if authentication is required but no valid
-            token is provided.
+            token is provided, or if a proxy-identified user is unknown and
+            the platform-admin bootstrap conditions do not apply.
 
     Examples:
         >>> from mcpgateway.utils import verify_credentials as vc
@@ -486,7 +724,7 @@ async def require_auth(request: Request, credentials: Optional[HTTPAuthorization
             # Extract user from proxy header
             proxy_user = request.headers.get(settings.proxy_user_header)
             if proxy_user:
-                return {"sub": proxy_user, "source": "proxy", "token": None}  # nosec B105 - None is not a password
+                return await _authenticate_proxy_user(request, proxy_user)
             # No proxy header - check auth_required (matches RBAC/WebSocket behavior)
             if settings.auth_required:
                 raise HTTPException(
@@ -1044,12 +1282,14 @@ async def require_auth_header_first(
     if request is None:
         request = Request(scope={"type": "http", "headers": []})
 
-    # Proxy auth path — identical to require_auth
+    # Proxy auth path — shares _authenticate_proxy_user() with require_auth
+    # so proxy-authenticated callers get the same enriched payload (teams,
+    # is_admin, email, request.state caching) regardless of entry point.
     if not settings.mcp_client_auth_enabled:
         if is_proxy_auth_trust_active():
             proxy_user = request.headers.get(settings.proxy_user_header)
             if proxy_user:
-                return {"sub": proxy_user, "source": "proxy", "token": None}  # nosec B105 - None is not a password
+                return await _authenticate_proxy_user(request, proxy_user)
             if settings.auth_required:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,

@@ -317,15 +317,18 @@ Resources in ContextForge have three visibility levels:
 |------------|-------------|-------------|
 | `public` | Accessible to all authenticated users | Everyone with valid token |
 | `team` | Accessible to team members only | Team members + admins (with bypass) |
-| `private` | Accessible to owner only | Resource owner + admins (with bypass) |
+| `private` | Accessible to owner only | Resource owner only — **never** admin bypass |
 
 ### Access Matrix by Token Type
 
 | Token Type | Public Resources | Team Resources | Private Resources |
 |------------|-----------------|----------------|-------------------|
-| Admin Bypass (`teams=null`, `is_admin=true`) | ✅ | ✅ (all teams) | ✅ (all) |
+| Admin Bypass (`teams=null`, `is_admin=true`) | ✅ | ✅ (all teams) | ❌ (owner-only, see note) |
 | Team-Scoped (`teams=["t1"]`) | ✅ | ✅ (own team) | ✅ (own only) |
 | Public-Only (`teams=[]`) | ✅ | ❌ | ❌ |
+
+!!! warning "Admin Bypass Does Not Include Other Users' Private Resources"
+    Since [#4341](https://github.com/IBM/mcp-context-forge/pull/4341), admin bypass **cannot** read, list, update, or delete another user's private resources. Private resources (visibility=`private`) are strictly owner-scoped. If cross-user access is intentional, prefer `team` visibility or a scoped token over relying on bypass. See `docs/architecture/multitenancy.md` for the canonical multi-tenancy model.
 
 !!! warning "Public-Only Token Limitations"
     **Public-only tokens (`teams=[]`) cannot access private resources, even if the resource is owned by the token's user.**
@@ -640,10 +643,21 @@ When `AUTH_REQUIRED=false`:
 | Use Case | Recommended Token Scope |
 |----------|------------------------|
 | Admin UI access | Session token (admin bypass is DB-derived; no `teams` claim needed) |
-| CI/CD pipeline | `teams: []` (public-only) |
+| Public-only CI/CD pipeline | `teams: []` (public resources only) |
+| Team-scoped CI/CD pipeline | Team-scoped token provisioned by an un-narrowed platform admin |
 | Service integration | Specific team(s) |
 | Developer access | Personal team + project teams |
 | Monitoring/alerting | `teams: []` with read permissions |
+| Service account provisioning | Un-narrowed platform admin (`is_admin: true`, `teams: null`) can create and list team tokens without joining the team |
+
+**Service Account Provisioning**: Un-narrowed platform admins (tokens with `is_admin: true` and `teams: null`) can create and list team-scoped tokens without being active team members. This enables:
+
+- Centralized token provisioning for CI/CD pipelines
+- Emergency access scenarios without joining teams
+- Automated service account management across teams
+- Cross-team token auditing and lifecycle management
+
+Narrowed admin sessions and regular users still require active team membership to create or list team tokens.
 
 ---
 

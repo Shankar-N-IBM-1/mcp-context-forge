@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for PermissionService."""
+"""Location: ./tests/unit/mcpgateway/services/test_permission_service.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
+
+Unit tests for PermissionService.
+"""
 
 # Standard
 from datetime import datetime, timedelta, timezone
@@ -103,7 +109,9 @@ def test_is_cache_valid_fresh(svc):
 @pytest.mark.asyncio
 async def test_is_user_admin_platform_admin(svc):
     """Platform admin email is recognized as admin."""
-    with patch("mcpgateway.services.permission_service.settings") as m:
+    # is_user_admin is read from mcpgateway.utils.admin_check now (shared
+    # helper unifying Layer 1 and Layer 2 admin detection).
+    with patch("mcpgateway.config.settings") as m:
         m.platform_admin_email = "admin@system.com"
         result = await svc._is_user_admin("admin@system.com")
     assert result is True
@@ -114,7 +122,7 @@ async def test_is_user_admin_db_admin(svc, mock_db):
     """DB user with is_admin=True is admin."""
     user = SimpleNamespace(is_admin=True)
     mock_db.execute.return_value.scalar_one_or_none.return_value = user
-    with patch("mcpgateway.services.permission_service.settings") as m:
+    with patch("mcpgateway.config.settings") as m:
         m.platform_admin_email = ""
         result = await svc._is_user_admin("admin@test.com")
     assert result is True
@@ -124,7 +132,7 @@ async def test_is_user_admin_db_admin(svc, mock_db):
 async def test_is_user_admin_regular_user(svc, mock_db):
     """Regular user is not admin."""
     mock_db.execute.return_value.scalar_one_or_none.return_value = SimpleNamespace(is_admin=False)
-    with patch("mcpgateway.services.permission_service.settings") as m:
+    with patch("mcpgateway.config.settings") as m:
         m.platform_admin_email = ""
         result = await svc._is_user_admin("user@test.com")
     assert result is False
@@ -134,7 +142,7 @@ async def test_is_user_admin_regular_user(svc, mock_db):
 async def test_is_user_admin_no_user(svc, mock_db):
     """Non-existent user is not admin."""
     mock_db.execute.return_value.scalar_one_or_none.return_value = None
-    with patch("mcpgateway.services.permission_service.settings") as m:
+    with patch("mcpgateway.config.settings") as m:
         m.platform_admin_email = ""
         result = await svc._is_user_admin("nobody@test.com")
     assert result is False

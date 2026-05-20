@@ -2,6 +2,7 @@
 """Location: ./tests/unit/mcpgateway/services/test_a2a_server_service.py
 Copyright 2026
 SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
 
 Unit tests for A2AServerService — virtual-server federation helpers.
 """
@@ -388,17 +389,27 @@ class TestCheckServerAccess:
 
     # -- Admin bypass -------------------------------------------------------
 
-    def test_admin_bypass_sees_private(self):
+    def test_admin_bypass_denies_private(self):
+        """PR #4341: anonymous admin bypass must NOT see another user's private server."""
         from mcpgateway.services.a2a_server_service import _check_server_access
 
         server = self._make_server(visibility="private", owner_email="other@test.com")
-        assert _check_server_access(server, None, None) is True
+        assert _check_server_access(server, None, None) is False
 
     def test_admin_bypass_sees_team(self):
         from mcpgateway.services.a2a_server_service import _check_server_access
 
         server = self._make_server(visibility="team", team_id="team-x")
         assert _check_server_access(server, None, None) is True
+
+    def test_db_admin_with_email_sees_own_private(self):
+        """PR #4341 carve-out: DB-admin (email, None) shape sees own private but not others'."""
+        from mcpgateway.services.a2a_server_service import _check_server_access
+
+        own_private = self._make_server(visibility="private", owner_email="admin@test.com")
+        others_private = self._make_server(visibility="private", owner_email="other@test.com")
+        assert _check_server_access(own_private, "admin@test.com", None) is True
+        assert _check_server_access(others_private, "admin@test.com", None) is False
 
     # -- No user context (not admin) ----------------------------------------
 

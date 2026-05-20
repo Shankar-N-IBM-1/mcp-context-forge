@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/routers/auth.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -18,12 +18,14 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 # First-Party
+from mcpgateway.auth import get_current_user
 from mcpgateway.config import settings
-from mcpgateway.db import SessionLocal
+from mcpgateway.db import EmailUser, SessionLocal
 from mcpgateway.routers.email_auth import create_access_token, get_client_ip, get_user_agent
 from mcpgateway.schemas import AuthenticationResponse, EmailUserResponse
 from mcpgateway.services.email_auth_service import EmailAuthService
 from mcpgateway.services.logging_service import LoggingService
+from mcpgateway.utils.verify_credentials import get_auth_header_value
 
 # Initialize logging
 logging_service = LoggingService()
@@ -119,6 +121,56 @@ class LoginRequest(BaseModel):
             raise ValueError("Either email or username must be provided")
 
 
+@auth_router.get("/csrf-token")
+async def get_csrf_token(request: Request, current_user: "EmailUser" = Depends(get_current_user)):
+    """Get a fresh CSRF token for the current authenticated user.
+
+    This endpoint generates a new CSRF token for the current session and sets it
+    as a cookie. Used by the frontend to refresh expired tokens.
+
+    Args:
+        request: FastAPI request object
+        current_user: Currently authenticated user
+
+    Returns:
+        dict: JSON response with csrf_token field
+
+    Raises:
+        HTTPException: If user authentication fails
+
+    Examples:
+        >>> # GET /auth/csrf-token
+        >>> # Headers: Authorization: Bearer <token>
+        >>> # Response: {"csrf_token": "abc123..."}
+    """
+    # Third-Party
+    from fastapi.responses import JSONResponse
+
+    # First-Party
+    from mcpgateway.config import settings
+    from mcpgateway.services.csrf_service import generate_csrf_token, set_csrf_cookie
+
+    try:
+        session_id = getattr(request.state, "jti", None)
+        if not session_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing session identifier")
+
+        # Generate fresh CSRF token
+        csrf_token = generate_csrf_token(user_id=current_user.email, session_id=session_id, secret=settings.csrf_secret_key, expiry=settings.csrf_token_expiry)
+
+        # Create response with CSRF cookie
+        response = JSONResponse(content={"csrf_token": csrf_token})
+        set_csrf_cookie(response, csrf_token, settings)
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating CSRF token for {current_user.email}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate CSRF token")
+
+
 @auth_router.post("/login", response_model=AuthenticationResponse)
 async def login(login_request: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """Authenticate user and return session JWT token.
@@ -172,6 +224,35 @@ async def login(login_request: LoginRequest, request: Request, db: Session = Dep
 
         logger.info(f"User {email} authenticated successfully")
 
+        # Generate CSRF token for session (rotate on login)
+        if settings.csrf_rotate_on_login:
+            try:
+                # Third-Party
+                from fastapi.responses import JSONResponse
+                import jwt
+
+                # First-Party
+                from mcpgateway.services.csrf_service import generate_csrf_token, set_csrf_cookie
+
+                # Decode JWT to get jti (don't verify since we just created it)
+                payload = jwt.decode(access_token, options={"verify_signature": False})
+                session_id = payload.get("jti", "")
+
+                # Generate CSRF token
+                csrf_token = generate_csrf_token(user_id=user.email, session_id=session_id, secret=settings.csrf_secret_key, expiry=settings.csrf_token_expiry)
+
+                auth_response = AuthenticationResponse(
+                    access_token=access_token, token_type="bearer", expires_in=expires_in, user=EmailUserResponse.from_email_user(user)
+                )  # nosec B106 - OAuth2 token type, not a password
+                response = JSONResponse(content=auth_response.model_dump(mode="json"))
+
+                set_csrf_cookie(response, csrf_token, settings)
+
+                return response
+            except Exception as e:
+                logger.warning(f"Failed to set CSRF token for {user.email}: {e}")
+                # Fall back to response without CSRF token (non-critical)
+
         # Return session token for UI access and API key management
         return AuthenticationResponse(
             access_token=access_token, token_type="bearer", expires_in=expires_in, user=EmailUserResponse.from_email_user(user)
@@ -185,3 +266,94 @@ async def login(login_request: LoginRequest, request: Request, db: Session = Dep
     except Exception as e:
         logger.error(f"Login error for {login_request.email or login_request.username}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Authentication service error")
+
+
+@auth_router.post("/logout")
+async def logout(request: Request, current_user: EmailUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Logout user and revoke session token.
+
+    This endpoint implements server-side token revocation by adding the token
+    to the blocklist, providing immediate invalidation as recommended by X-Force Red.
+
+    Args:
+        request: FastAPI request object
+        current_user: Current authenticated user from dependency
+        db: Database session
+
+    Returns:
+        Success response confirming logout
+
+    Raises:
+        HTTPException: If logout fails
+
+    Security:
+        - Adds token to server-side blocklist
+        - Token cannot be reused after logout
+        - Supports audit trail for security monitoring
+    """
+    # First-Party
+    from mcpgateway.services.token_blocklist_service import get_token_blocklist_service
+
+    try:
+        # User is already authenticated via dependency injection
+        user = current_user
+
+        # Extract JWT from the configured auth header (default: Authorization).
+        # Reading from settings.auth_header_name keeps logout aligned with the
+        # auth dependency that just validated the same caller; otherwise a custom
+        # AUTH_HEADER_NAME lets a request authenticate but never revoke its token.
+        auth_header = get_auth_header_value(request.headers) or ""
+        scheme, _, raw_token = auth_header.partition(" ")
+        if scheme.lower() != "bearer" or not raw_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No valid authorization token provided")
+
+        token = raw_token.strip()
+
+        # Decode token to get JTI and expiry
+        # Third-Party
+        import jwt
+
+        # First-Party
+        from mcpgateway.config import settings
+
+        try:
+            # Handle both SecretStr and string types for jwt_secret_key
+            secret_key = settings.jwt_secret_key
+            if hasattr(secret_key, "get_secret_value"):
+                secret_key = secret_key.get_secret_value()
+
+            payload = jwt.decode(token, secret_key, algorithms=[settings.jwt_algorithm], options={"verify_signature": False})  # Already verified by get_current_user
+
+            jti = payload.get("jti")
+            exp = payload.get("exp")
+            last_activity = payload.get("last_activity", payload.get("iat"))
+
+            if not jti:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token does not support revocation (missing JTI)")
+
+            # Convert timestamps to datetime
+            # Standard
+            from datetime import datetime, timezone
+
+            token_expiry = datetime.fromtimestamp(exp, tz=timezone.utc) if exp else None
+            last_activity_dt = datetime.fromtimestamp(last_activity, tz=timezone.utc) if last_activity else None
+
+            # Revoke token using blocklist service
+            blocklist_service = get_token_blocklist_service(db=db)
+            success = blocklist_service.revoke_token(jti=jti, revoked_by=user.email, reason="logout", token_expiry=token_expiry, last_activity=last_activity_dt)
+
+            if not success:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to revoke token")
+
+            logger.info(f"User {user.email} logged out successfully", extra={"security_event": "logout", "user_email": user.email, "jti": jti})
+
+            return {"message": "Logged out successfully", "revoked_token": jti}
+
+        except jwt.DecodeError:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token format")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Logout error: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Logout service error")

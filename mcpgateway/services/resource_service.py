@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/services/resource_service.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -60,11 +60,10 @@ from mcpgateway.db import ResourceMetric, ResourceMetricsHourly
 from mcpgateway.db import ResourceSubscription as DbSubscription
 from mcpgateway.db import server_resource_association
 from mcpgateway.observability import create_span, set_span_attribute, set_span_error
-from mcpgateway.plugins.framework import GlobalContext, PluginContextTable, ResourceHookType, ResourcePostFetchPayload, ResourcePreFetchPayload
 from mcpgateway.schemas import ResourceCreate, ResourceMetrics, ResourceRead, ResourceSubscription, ResourceUpdate, TopPerformer
 from mcpgateway.services.audit_trail_service import get_audit_trail_service
 from mcpgateway.services.base_service import BaseService
-from mcpgateway.services.content_security import ContentSizeError, ContentTypeError, get_content_security_service
+from mcpgateway.services.content_security import ContentPatternError, ContentSizeError, ContentTypeError, get_content_security_service
 from mcpgateway.services.event_service import EventService
 from mcpgateway.services.logging_service import LoggingService
 from mcpgateway.services.metrics_buffer_service import get_metrics_buffer_service
@@ -74,7 +73,9 @@ from mcpgateway.services.observability_service import current_trace_id, Observab
 from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.upstream_session_registry import downstream_session_id_from_request_context as _downstream_session_id_from_request
 from mcpgateway.services.upstream_session_registry import get_upstream_session_registry, RegistryNotInitializedError, TransportType
+from mcpgateway.utils.admin_check import is_admin_bypass_granted, is_user_admin
 from mcpgateway.utils.gateway_access import build_gateway_auth_headers, check_gateway_access
+from mcpgateway.utils.identity_propagation import build_identity_headers
 from mcpgateway.utils.metrics_common import build_top_performers
 from mcpgateway.utils.pagination import unified_paginate
 from mcpgateway.utils.services_auth import decode_auth
@@ -84,6 +85,16 @@ from mcpgateway.utils.trace_context import format_trace_team_scope
 from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message
 from mcpgateway.utils.validate_signature import validate_signature
+
+# Plugin support imports (conditional)
+try:
+    # Third-Party
+    from cpex.framework import GlobalContext, PluginContextTable, ResourceHookType, ResourcePostFetchPayload, ResourcePreFetchPayload
+
+    PLUGINS_AVAILABLE = True
+except ImportError:
+    PLUGINS_AVAILABLE = False
+
 
 # Cache import (lazy to avoid circular dependencies)
 _REGISTRY_CACHE = None
@@ -253,8 +264,16 @@ class ResourceService(BaseService):
         self._template_cache: Dict[str, ResourceTemplate] = {}
         self.oauth_manager = OAuthManager(request_timeout=int(os.getenv("OAUTH_REQUEST_TIMEOUT", "30")), max_retries=int(os.getenv("OAUTH_MAX_RETRIES", "3")))
 
-        # Initialize mime types
+        # Register MIME types for resource content detection
+        # This runs in __init__ rather than initialize() because:
+        # 1. Many tests create ResourceService instances without calling initialize()
+        # 2. MIME type registration is idempotent and safe at import time
+        # 3. The _detect_mime_type_from_uri method depends on these registrations
         mimetypes.init()
+        if not mimetypes.guess_type("file.md")[0]:
+            mimetypes.add_type("text/markdown", ".md")
+        if not mimetypes.guess_type("file.markdown")[0]:
+            mimetypes.add_type("text/markdown", ".markdown")
 
     async def initialize(self) -> None:
         """Initialize the service."""
@@ -448,10 +467,13 @@ class ResourceService(BaseService):
     ) -> ResourceRead:
         """Register a new resource.
 
-        MIME Type Resolution Priority:
-        1. **User-provided type** (highest priority) - Caller explicitly declares content type
-        2. **URI-detected type** - Fallback via ``mimetypes.guess_type(uri)``
-        3. **Content-based fallback** - ``text/plain`` for strings, ``application/octet-stream`` for bytes
+        MIME Type Detection Priority (NEW BEHAVIOR):
+        1. **URL-detected type** (highest priority) - If MIME type can be detected from URI extension
+        2. **User-provided type** - Only used if URL detection fails
+        3. **Content-based fallback** - If no type provided and no URL detection
+
+        This ensures accuracy by preferring URL-detected types (e.g., .md → text/markdown)
+        over potentially incorrect user input.
 
         Args:
             db: Database session
@@ -517,15 +539,30 @@ class ResourceService(BaseService):
 
             content_security.validate_resource_size(content=content_to_validate, uri=resource.uri, user_email=created_by, ip_address=created_from_ip)
 
-            # MIME type resolution priority:
-            # 1. User-provided type (caller explicitly declares the content type)
-            # 2. URI-detected type (fallback when user omits the field)
-            # 3. Content-based fallback (text/plain for str, application/octet-stream for bytes)
-            if resource.mime_type:
+            # Validate content for malicious patterns (US-3) - CWE-116 fix
+            if content_to_validate:
+                content_str = content_to_validate if isinstance(content_to_validate, str) else content_to_validate.decode("utf-8", errors="ignore")
+                content_security.detect_malicious_patterns(
+                    content=content_str,
+                    content_type="Resource content",
+                    user_email=created_by,
+                    ip_address=created_from_ip,
+                )
+
+            # Prefer URL-detected MIME type over user-provided to ensure accuracy
+            # This prevents users from entering incorrect MIME types
+            url_detected_mime = self._detect_mime_type_from_uri(resource.uri)
+            if url_detected_mime:
+                mime_type = url_detected_mime
+                if resource.mime_type and resource.mime_type != url_detected_mime:
+                    logger.info(f"Using URL-detected MIME type '{url_detected_mime}' instead of user-provided '{resource.mime_type}' for URI: {resource.uri}")
+            elif resource.mime_type:
+                # No URL detection possible, use user-provided
                 mime_type = resource.mime_type
             else:
+                # No URL detection and no user input, fallback to content-based detection
                 mime_type = self._detect_mime_type(resource.uri, resource.content)
-                logger.info(f"Auto-detected MIME type for {resource.uri}: {mime_type}")
+                logger.info(f"Fallback MIME type detection for {resource.uri}: {mime_type}")
 
             # Validate MIME type against allowlist
             content_security.validate_resource_mime_type(
@@ -673,7 +710,7 @@ class ResourceService(BaseService):
             )
             raise rce
         except ContentSizeError as cse:
-
+            db.rollback()
             structured_logger.log(
                 level="ERROR",
                 message=f"Resource content size limit exceeded: {cse.actual_size} bytes (max: {cse.max_size} bytes)",
@@ -688,7 +725,7 @@ class ResourceService(BaseService):
             )
             raise cse
         except ContentTypeError as cte:
-
+            db.rollback()
             structured_logger.log(
                 level="ERROR",
                 message=f"Resource MIME type not allowed: {cte.mime_type}",
@@ -703,6 +740,22 @@ class ResourceService(BaseService):
                 },
             )
             raise cte
+        except ContentPatternError as cpe:
+            db.rollback()
+            structured_logger.log(
+                level="ERROR",
+                message=f"Resource content blocked by malicious pattern detection: {cpe.violation_type}",
+                event_type="resource_pattern_rejected",
+                component="resource_service",
+                user_id=created_by,
+                user_email=owner_email,
+                custom_fields={
+                    "resource_uri": resource.uri,
+                    "violation_type": cpe.violation_type,
+                    "visibility": visibility,
+                },
+            )
+            raise cpe
         except Exception as e:
             db.rollback()
 
@@ -826,20 +879,24 @@ class ResourceService(BaseService):
                                 ip_address=created_from_ip,
                             )
 
-                        # MIME type resolution (same priority as register_resource):
-                        # user-provided > URI-detected > content-based fallback
-                        if getattr(resource, "mime_type", None):
-                            bulk_mime_type = resource.mime_type
-                        else:
-                            bulk_mime_type = self._detect_mime_type(resource.uri, getattr(resource, "content", "") or "")
-
                         # Validate MIME type against allowlist
                         content_security.validate_resource_mime_type(
-                            mime_type=bulk_mime_type,
+                            mime_type=getattr(resource, "mime_type", None),
                             uri=resource.uri,
                             user_email=created_by,
                             ip_address=created_from_ip,
                         )
+
+                        # Same US-3 malicious-pattern scan that register_resource() runs.
+                        # Keep in lock-step with the single-resource path.
+                        if hasattr(resource, "content") and resource.content:
+                            content_str = resource.content if isinstance(resource.content, str) else resource.content.decode("utf-8", errors="ignore")
+                            content_security.detect_malicious_patterns(
+                                content=content_str,
+                                content_type="Resource content",
+                                user_email=created_by,
+                                ip_address=created_from_ip,
+                            )
 
                         # Use provided parameters or schema values
                         resource_team_id = team_id if team_id is not None else getattr(resource, "team_id", None)
@@ -860,7 +917,7 @@ class ResourceService(BaseService):
                                 existing_resource.name = resource.name
                                 existing_resource.title = getattr(resource, "title", None)
                                 existing_resource.description = resource.description
-                                existing_resource.mime_type = bulk_mime_type
+                                existing_resource.mime_type = getattr(resource, "mime_type", None)
                                 existing_resource.size = getattr(resource, "size", None)
                                 existing_resource.uri_template = resource.uri_template
                                 existing_resource.tags = resource.tags or []
@@ -881,7 +938,7 @@ class ResourceService(BaseService):
                                     name=resource.name,
                                     title=getattr(resource, "title", None),
                                     description=resource.description,
-                                    mime_type=bulk_mime_type,
+                                    mime_type=getattr(resource, "mime_type", None),
                                     size=getattr(resource, "size", None),
                                     uri_template=resource.uri_template,
                                     gateway_id=getattr(resource, "gateway_id", None),
@@ -910,7 +967,7 @@ class ResourceService(BaseService):
                                 name=resource.name,
                                 title=getattr(resource, "title", None),
                                 description=resource.description,
-                                mime_type=bulk_mime_type,
+                                mime_type=getattr(resource, "mime_type", None),
                                 size=getattr(resource, "size", None),
                                 uri_template=resource.uri_template,
                                 gateway_id=getattr(resource, "gateway_id", None),
@@ -1037,10 +1094,13 @@ class ResourceService(BaseService):
         if visibility == "public":
             return True
 
-        # Admin bypass: token_teams=None AND user_email=None means unrestricted admin
-        # This happens when is_admin=True and no team scoping in token
+        # Admin bypass (PR #4341 invariant): never reveal another user's private rows.
+        # Anonymous bypass sees public + team only; a DB-resolved admin session
+        # additionally sees their own private rows. Matches a2a_service._visible_agent_ids.
         if token_teams is None and user_email is None:
-            return True
+            return visibility != "private"
+        if token_teams is None and user_email and is_user_admin(db, user_email):
+            return visibility != "private" or resource_owner_email == user_email
 
         # No user context (but not admin) = deny access to non-public resources
         if not user_email:
@@ -1803,7 +1863,7 @@ class ResourceService(BaseService):
 
                         return httpx.AsyncClient(
                             verify=ssl_context if ssl_context else get_default_verify(),  # pylint: disable=cell-var-from-loop
-                            follow_redirects=True,
+                            follow_redirects=False,
                             headers=headers,
                             timeout=timeout if timeout else get_http_timeout(),
                             auth=auth,
@@ -1885,7 +1945,9 @@ class ResourceService(BaseService):
                             else:
                                 # For Client Credentials flow, get token directly (makes network calls)
                                 try:
-                                    access_token: str = await self.oauth_manager.get_access_token(gateway_oauth_config)
+                                    access_token: str = await self.oauth_manager.get_access_token(
+                                        gateway_oauth_config, ca_certificate=gateway.ca_certificate, client_cert=gateway.client_cert, client_key=gateway.client_key
+                                    )
                                     headers["Authorization"] = f"Bearer {access_token}"
                                 except Exception as e:
                                     if span:
@@ -1900,6 +1962,14 @@ class ResourceService(BaseService):
                                 headers = {str(k): str(v) for k, v in auth_data.items()}
                             else:
                                 headers = {}
+
+                        # Inject identity propagation headers if user_identity is a UserContext
+                        if user_identity:
+                            # First-Party
+                            from mcpgateway.transports.context import UserContext as UserCtx  # pylint: disable=import-outside-toplevel  # noqa: N814
+
+                            if isinstance(user_identity, UserCtx):
+                                headers.update(build_identity_headers(user_identity))
 
                         async def connect_to_sse_session(server_url: str, uri: str, authentication: Optional[Dict[str, str]] = None) -> str | None:
                             """
@@ -2350,6 +2420,10 @@ class ResourceService(BaseService):
 
                             # Prepare headers with gateway auth
                             headers = build_gateway_auth_headers(gateway)
+
+                            # Inject identity propagation headers
+                            if plugin_global_context and plugin_global_context.user_context:
+                                headers.update(build_identity_headers(plugin_global_context.user_context, gateway))
 
                             # Use MCP SDK to connect and read resource
                             async with streamablehttp_client(url=gateway.url, headers=headers, timeout=settings.mcpgateway_direct_proxy_timeout) as (read_stream, write_stream, _get_session_id):
@@ -2867,10 +2941,10 @@ class ResourceService(BaseService):
         """
         Update a resource.
 
-        MIME Type Resolution Priority:
-        1. **User-provided type** (highest priority) - Caller explicitly declares content type
-        2. **URI-detected type** - Fallback when empty string provided
-        3. **Content-based fallback** - If empty string and no URI detection
+        MIME Type Detection Priority (NEW BEHAVIOR):
+        1. **URL-detected type** (highest priority) - If MIME type can be detected from URI extension
+        2. **User-provided type** - Only used if URL detection fails
+        3. **Content-based fallback** - If empty string provided and no URL detection
         4. **Preserve existing** - If None/not provided
 
         This ensures accuracy by preferring URL-detected types (e.g., .md → text/markdown)
@@ -2957,42 +3031,31 @@ class ResourceService(BaseService):
                 resource.uri = resource_update.uri
             if resource_update.name is not None:
                 resource.name = resource_update.name
-            if resource_update.description is not None:
-                resource.description = resource_update.description
             if resource_update.title is not None:
                 resource.title = resource_update.title
-            # Resolve the new MIME type into a local variable and validate
-            # BEFORE writing to the tracked model to avoid dirty session state.
-            # Priority: user-provided > URI-detected > content-based fallback.
-            resolved_mime_type = None
-            if resource_update.mime_type is not None:
-                if resource_update.mime_type:
-                    # Non-empty: user explicitly provided a type — trust it
-                    resolved_mime_type = resource_update.mime_type
-                else:
-                    # Empty string: auto-detect from URI/content
-                    content_for_detection = resource_update.content if resource_update.content is not None else (resource.text_content or resource.binary_content)
-                    uri_for_detection = resource_update.uri if resource_update.uri is not None else resource.uri
-                    resolved_mime_type = self._detect_mime_type(uri_for_detection, content_for_detection)
-                    logger.info(f"Auto-detected MIME type for resource {resource_id}: {resolved_mime_type}")
-            elif resource_update.uri is not None:
-                # URI changed but no MIME type provided — try URI detection as fallback
-                url_detected_mime = self._detect_mime_type_from_uri(resource_update.uri)
+            if resource_update.description is not None:
+                resource.description = resource_update.description
+            if resource_update.mime_type is not None or resource_update.uri is not None:
+                # Prefer URL-detected MIME type over user-provided to ensure accuracy
+                uri_for_detection = resource_update.uri if resource_update.uri is not None else resource.uri
+                url_detected_mime = self._detect_mime_type_from_uri(uri_for_detection)
+
                 if url_detected_mime:
-                    resolved_mime_type = url_detected_mime
-
-            # Validate the candidate MIME type BEFORE mutating the model
-            content_security = get_content_security_service()
-            if resolved_mime_type is not None:
-                content_security.validate_resource_mime_type(
-                    mime_type=resolved_mime_type,
-                    uri=resource_update.uri or resource.uri,
-                    user_email=modified_by or user_email,
-                    ip_address=modified_from_ip,
-                )
-                # Validation passed — safe to assign
-                resource.mime_type = resolved_mime_type
-
+                    # URL detection successful - use it
+                    if resource_update.mime_type and resource_update.mime_type != url_detected_mime:
+                        logger.info(f"Using URL-detected MIME type '{url_detected_mime}' instead of user-provided '{resource_update.mime_type}' for resource {resource_id}")
+                    resource.mime_type = url_detected_mime
+                elif resource_update.mime_type is not None:
+                    # No URL detection, handle user-provided value
+                    if not resource_update.mime_type:
+                        # Empty string - fallback to content-based detection
+                        content_for_detection = resource_update.content if resource_update.content is not None else (resource.text_content or resource.binary_content)
+                        detected_mime_type = self._detect_mime_type(uri_for_detection, content_for_detection)
+                        logger.info(f"Fallback MIME type detection for resource {resource_id}: {detected_mime_type}")
+                        resource.mime_type = detected_mime_type
+                    else:
+                        # Use user-provided MIME type
+                        resource.mime_type = resource_update.mime_type
             if resource_update.uri_template is not None:
                 resource.uri_template = resource_update.uri_template
             if resource_update.visibility is not None:
@@ -3004,6 +3067,9 @@ class ResourceService(BaseService):
 
             # Update content if provided
             if resource_update.content is not None:
+                # Initialize content security service
+                content_security = get_content_security_service()
+
                 # Validate content size before updating
                 content_security.validate_resource_size(
                     content=resource_update.content,
@@ -3011,6 +3077,25 @@ class ResourceService(BaseService):
                     user_email=modified_by or user_email,
                     ip_address=modified_from_ip,
                 )
+
+                # Validate content for malicious patterns (US-3) - CWE-116 fix
+                content_str = resource_update.content if isinstance(resource_update.content, str) else resource_update.content.decode("utf-8", errors="ignore")
+                content_security.detect_malicious_patterns(
+                    content=content_str,
+                    content_type="Resource content",
+                    user_email=modified_by or user_email,
+                    ip_address=modified_from_ip,
+                )
+
+                # Validate MIME type (use detected type if empty was provided)
+                mime_type_to_validate = resource.mime_type if resource_update.mime_type is not None else None
+                if mime_type_to_validate:
+                    content_security.validate_resource_mime_type(
+                        mime_type=mime_type_to_validate,
+                        uri=resource_update.uri or resource.uri,
+                        user_email=modified_by or user_email,
+                        ip_address=modified_from_ip,
+                    )
 
                 # Determine content storage
                 is_text = resource.mime_type and resource.mime_type.startswith("text/") or isinstance(resource_update.content, str)
@@ -3179,6 +3264,23 @@ class ResourceService(BaseService):
                 },
             )
             raise cte
+        except ContentPatternError as cpe:
+            db.rollback()
+            structured_logger.log(
+                level="ERROR",
+                message=f"Resource content blocked by malicious pattern detection: {cpe.violation_type}",
+                event_type="resource_pattern_rejected",
+                component="resource_service",
+                resource_type="resource",
+                user_id=modified_by,
+                user_email=user_email,
+                resource_id=str(resource_id),
+                error=cpe,
+                custom_fields={
+                    "violation_type": cpe.violation_type,
+                },
+            )
+            raise cpe
         except ResourceURIConflictError as pe:
             logger.error(f"Resource URI conflict: {pe}")
 
@@ -3388,20 +3490,29 @@ class ResourceService(BaseService):
             )
             raise ResourceError(f"Failed to delete resource: {str(e)}")
 
-    async def get_resource_by_id(self, db: Session, resource_id: str, include_inactive: bool = False) -> ResourceRead:
+    async def get_resource_by_id(
+        self,
+        db: Session,
+        resource_id: str,
+        include_inactive: bool = False,
+        user_email: Optional[str] = None,
+        token_teams: Optional[List[str]] = None,
+    ) -> ResourceRead:
         """
-        Get a resource by ID.
+        Get a resource by ID with access control.
 
         Args:
             db: Database session
             resource_id: Resource ID
             include_inactive: Whether to include inactive resources
+            user_email: Email of the requesting user. ``None`` paired with ``token_teams=None`` means admin bypass.
+            token_teams: JWT-scoped team list used for Layer 1 visibility checks.
 
         Returns:
             ResourceRead: The resource object
 
         Raises:
-            ResourceNotFoundError: If the resource is not found
+            ResourceNotFoundError: If the resource is not found or the caller lacks visibility.
 
         Example:
             >>> from mcpgateway.services.resource_service import ResourceService
@@ -3431,6 +3542,23 @@ class ResourceService(BaseService):
                     if inactive_resource:
                         raise ResourceNotFoundError(f"Resource '{resource_id}' exists but is inactive")
 
+                raise ResourceNotFoundError(f"Resource not found: {resource_id}")
+
+            if not await self._check_resource_access(db, resource, user_email, token_teams):
+                structured_logger.log(
+                    level="INFO",
+                    message="Resource access denied",
+                    event_type="resource_access_denied",
+                    component="resource_service",
+                    resource_type="resource",
+                    resource_id=str(resource.id),
+                    team_id=getattr(resource, "team_id", None),
+                    user_email=user_email,
+                    custom_fields={
+                        "visibility": getattr(resource, "visibility", None),
+                        "admin_bypass": is_admin_bypass_granted(db, user_email, token_teams),
+                    },
+                )
                 raise ResourceNotFoundError(f"Resource not found: {resource_id}")
 
             resource_read = self.convert_resource_to_read(resource)
@@ -3564,7 +3692,12 @@ class ResourceService(BaseService):
             token_teams=effective_token_teams,
         )
 
-    async def subscribe_events(self, user_email: Optional[str] = None, token_teams: Optional[List[str]] = None) -> AsyncGenerator[Dict[str, Any], None]:
+    async def subscribe_events(
+        self,
+        user_email: Optional[str] = None,
+        token_teams: Optional[List[str]] = None,
+        is_admin_bypass: bool = False,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Subscribe to Resource events via the EventService.
 
         Args:
@@ -3573,12 +3706,28 @@ class ResourceService(BaseService):
                 - ``None`` = unrestricted admin
                 - ``[]`` = public-only
                 - ``[...]`` = team-scoped access
+            is_admin_bypass: Pre-resolved DB-admin bypass flag.  Callers
+                that can consult a request-scoped session (e.g. the SSE
+                HTTP handler) should compute this once via
+                :func:`mcpgateway.utils.admin_check.is_user_admin` and
+                pass it in; this avoids a throw-away session spawn per
+                subscription and keeps the bypass check near the auth
+                boundary.
 
         Yields:
             Resource event messages.
+
+        Security note:
+            ``is_admin_bypass`` is snapshotted by the caller and sticky
+            for the stream lifetime.  A user demoted mid-subscription
+            keeps visibility until reconnect — this is an intentional
+            trade-off between auth freshness and SSE simplicity.  Callers
+            MUST only pass ``is_admin_bypass=True`` when
+            ``token_teams is None`` (auth-layer bypass); see
+            :mod:`mcpgateway.utils.admin_check`.
         """
         async for event in self._event_service.subscribe_events():
-            if user_email is None and token_teams is None:
+            if (user_email is None and token_teams is None) or is_admin_bypass:
                 yield event
                 continue
 
@@ -3908,15 +4057,24 @@ class ResourceService(BaseService):
             if not include_inactive:
                 query = query.where(DbResource.enabled)
 
-            # Apply visibility filtering when token_teams is set (non-admin access)
-            if token_teams is not None:
-                # Check if this is a public-only token (empty teams array)
-                # Public-only tokens can ONLY see public templates - no owner access
+            # Admin bypass (PR #4341 invariant): never reveal another user's private
+            # templates. Anonymous bypass sees public + team only; a DB-resolved admin
+            # session additionally sees their own private templates. Without the
+            # second branch the (email, None) DB-admin shape fell through with no
+            # visibility filter applied, leaking all private templates.
+            if user_email is None and token_teams is None:
+                query = query.where(DbResource.visibility != "private")
+            elif token_teams is None and user_email and is_user_admin(db, user_email):
+                query = query.where(
+                    or_(
+                        DbResource.visibility != "private",
+                        and_(DbResource.visibility == "private", DbResource.owner_email == user_email),
+                    )
+                )
+            elif token_teams is not None:
                 is_public_only_token = len(token_teams) == 0
-
                 conditions = [DbResource.visibility == "public"]
 
-                # Only include owner access for non-public-only tokens with user_email
                 if not is_public_only_token and user_email:
                     conditions.append(DbResource.owner_email == user_email)
 

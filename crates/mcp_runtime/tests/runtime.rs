@@ -129,6 +129,11 @@ fn test_runtime_config() -> RuntimeConfig {
         redis_url: None,
         db_pool_max_size: 20,
         log_filter: "error".to_string(),
+        backend_validation_enabled: true,
+        backend_allowed_hosts: "localhost,127.0.0.1".to_string(),
+        backend_blocked_networks: "169.254.169.254/32".to_string(),
+        backend_max_url_length: 2048,
+        max_request_body_size_bytes: contextforge_mcp_runtime::config::DEFAULT_MAX_REQUEST_BODY_SIZE_BYTES,
         exit_after_startup_ms: None,
     }
 }
@@ -1640,7 +1645,6 @@ async fn session_core_transport_denies_same_email_with_different_auth_binding() 
     };
     let runtime_url = spawn_router(runtime).await;
     let owner_auth = URL_SAFE_NO_PAD.encode(
-        // pragma: allowlist secret
         serde_json::to_vec(&json!({
             "email": "owner@example.com", // pragma: allowlist secret
             "teams": ["team-a"],

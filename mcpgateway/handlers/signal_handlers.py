@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Signal handlers for ContextForge Gateway.
+"""Location: ./mcpgateway/handlers/signal_handlers.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
+
+Signal handlers for ContextForge Gateway.
 
 Provides SIGHUP handling for certificate rotation without restart.
 """
@@ -39,8 +44,8 @@ async def sighup_reload() -> None:
     try:
         # First-Party
         from mcpgateway.services.upstream_session_registry import (  # pylint: disable=import-outside-toplevel
-            RegistryNotInitializedError,
             get_upstream_session_registry,
+            RegistryNotInitializedError,
         )
 
         await get_upstream_session_registry().close_all()

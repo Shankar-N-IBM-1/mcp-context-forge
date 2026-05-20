@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/alembic/env.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti, Madhav Kandukuri
 
@@ -43,6 +43,7 @@ Note:
 
 # Standard
 from importlib.resources import files
+import logging
 from logging.config import fileConfig
 
 # Third-Party
@@ -110,9 +111,10 @@ def _inside_alembic() -> bool:
 
 config.set_main_option("script_location", str(files("mcpgateway").joinpath("alembic")))
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
+# Only apply alembic.ini logging when root has no handlers (standalone CLI).
+# Skip when imported from the gateway lifespan to avoid fileConfig() resetting
+# root handlers/level (disable_existing_loggers does not protect root).
+if config.config_file_name is not None and not logging.getLogger().handlers:
     fileConfig(
         config.config_file_name,
         disable_existing_loggers=False,
@@ -178,6 +180,14 @@ def run_migrations_online() -> None:
 
             with context.begin_transaction():
                 context.run_migrations()
+
+            # Ensure all migration work is committed.
+            # When dialect-detection SQL triggers autobegin before configure(),
+            # Alembic sets _in_external_transaction=True and begin_transaction()
+            # becomes a no-op (nullcontext). In that case the transaction is
+            # never committed by begin_transaction().__exit__, so we commit here.
+            if connection.in_transaction():
+                connection.commit()
 
     else:
         # Alembic already has a connection (e.g., in tests)

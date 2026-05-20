@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/services/server_service.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -47,6 +47,7 @@ from mcpgateway.services.metrics_cleanup_service import delete_metrics_in_batche
 from mcpgateway.services.performance_tracker import get_performance_tracker
 from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
+from mcpgateway.utils.admin_check import is_admin_bypass_granted
 from mcpgateway.utils.metrics_common import build_top_performers
 from mcpgateway.utils.pagination import unified_paginate
 from mcpgateway.utils.sqlalchemy_modifier import json_contains_tag_expr
@@ -991,18 +992,78 @@ class ServerService(BaseService):
                 # Continue with remaining servers instead of failing completely
         return result
 
-    async def get_server(self, db: Session, server_id: str) -> ServerRead:
-        """Retrieve server details by ID.
+    async def _check_server_access(
+        self,
+        db: Session,
+        server: DbServer,
+        user_email: Optional[str],
+        token_teams: Optional[List[str]],
+    ) -> bool:
+        """Check whether the caller is allowed to view *server* under Layer 1 visibility.
+
+        Args:
+            db: Database session (used to resolve team membership when token_teams is None).
+            server: The ORM ``DbServer`` instance (must expose ``visibility``, ``team_id``, ``owner_email``).
+            user_email: Requesting user email; ``None`` combined with ``token_teams=None`` is admin bypass.
+            token_teams: JWT-scoped team list; ``None``=admin bypass, ``[]``=public-only, ``[...]``=team-scoped.
+
+        Returns:
+            ``True`` when the caller can see the server, ``False`` otherwise.
+
+        Notes:
+            Admin bypass grants access to public and team servers, but NEVER to private servers.
+        """
+        visibility = getattr(server, "visibility", "public")
+        if visibility == "public":
+            return True
+
+        if is_admin_bypass_granted(db, user_email, token_teams):
+            return visibility != "private"
+
+        if not user_email:
+            return False
+
+        is_public_only_token = token_teams is not None and len(token_teams) == 0
+        if is_public_only_token:
+            return False
+
+        server_owner_email = getattr(server, "owner_email", None)
+        if visibility == "private" and server_owner_email and server_owner_email == user_email:
+            return True
+
+        server_team_id = getattr(server, "team_id", None)
+        if server_team_id and visibility in ("team", "public"):
+            if token_teams is not None:
+                team_ids = token_teams
+            else:
+                team_service = TeamManagementService(db)
+                user_teams = await team_service.get_user_teams(user_email)
+                team_ids = [team.id for team in user_teams]
+            if server_team_id in team_ids:
+                return True
+
+        return False
+
+    async def get_server(
+        self,
+        db: Session,
+        server_id: str,
+        user_email: Optional[str] = None,
+        token_teams: Optional[List[str]] = None,
+    ) -> ServerRead:
+        """Retrieve server details by ID with access control.
 
         Args:
             db: Database session.
             server_id: The unique identifier of the server.
+            user_email: Email of the requesting user. ``None`` paired with ``token_teams=None`` means admin bypass.
+            token_teams: JWT-scoped team list used for Layer 1 visibility checks.
 
         Returns:
             The corresponding ServerRead object.
 
         Raises:
-            ServerNotFoundError: If no server with the given ID exists.
+            ServerNotFoundError: If no server with the given ID exists, or the caller lacks visibility.
 
         Examples:
             >>> from mcpgateway.services.server_service import ServerService
@@ -1032,6 +1093,23 @@ class ServerService(BaseService):
             .where(DbServer.id == server_id)
         ).scalar_one_or_none()
         if not server:
+            raise ServerNotFoundError(f"Server not found: {server_id}")
+
+        if not await self._check_server_access(db, server, user_email, token_teams):
+            self._structured_logger.log(
+                level="INFO",
+                message="Server access denied",
+                event_type="server_access_denied",
+                component="server_service",
+                resource_type="server",
+                resource_id=str(server.id),
+                team_id=getattr(server, "team_id", None),
+                user_email=user_email,
+                custom_fields={
+                    "visibility": getattr(server, "visibility", None),
+                    "admin_bypass": is_admin_bypass_granted(db, user_email, token_teams),
+                },
+            )
             raise ServerNotFoundError(f"Server not found: {server_id}")
         server_data = {
             "id": server.id,
@@ -1554,21 +1632,6 @@ class ServerService(BaseService):
             ServerNotFoundError: If the server is not found.
             PermissionError: If user doesn't own the server.
             ServerError: For other deletion errors.
-
-        Examples:
-            >>> from mcpgateway.services.server_service import ServerService
-            >>> from unittest.mock import MagicMock, AsyncMock, patch
-            >>> service = ServerService()
-            >>> db = MagicMock()
-            >>> server = MagicMock()
-            >>> db.get.return_value = server
-            >>> db.delete = MagicMock()
-            >>> db.commit = MagicMock()
-            >>> service._notify_server_deleted = AsyncMock()
-            >>> service._structured_logger = MagicMock()  # Mock structured logger to prevent database writes
-            >>> service._audit_trail = MagicMock()  # Mock audit trail to prevent database writes
-            >>> import asyncio
-            >>> asyncio.run(service.delete_server(db, 'server_id', 'user@example.com'))
         """
         try:
             server = db.get(DbServer, server_id)

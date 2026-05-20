@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/services/audit_trail_service.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
 
 Audit Trail Service.
 
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 # First-Party
 from mcpgateway.config import settings
 from mcpgateway.db import AuditTrail, SessionLocal
+from mcpgateway.services.siem_export_service import get_siem_export_service
 from mcpgateway.utils.correlation_id import get_or_generate_correlation_id
 
 logger = logging.getLogger(__name__)
@@ -93,6 +95,9 @@ class AuditTrailService:
         details: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         db: Optional[Session] = None,
+        auth_method: Optional[str] = None,
+        acting_as: Optional[str] = None,
+        delegation_chain: Optional[Dict[str, Any]] = None,
     ) -> Optional[AuditTrail]:
         """Log an audit trail entry.
 
@@ -119,15 +124,47 @@ class AuditTrailService:
             details: Extra key/value payload (stored under context.details)
             metadata: Extra metadata payload (stored under context.metadata)
             db: Optional database session
+            auth_method: Authentication method used (bearer, api_key, basic, sso, proxy)
+            acting_as: Service account acting on behalf of user
+            delegation_chain: Chain of delegated identities
 
         Returns:
             Created AuditTrail entry or None if logging disabled
         """
-        # Check if audit trail logging is enabled
+        correlation_id = get_or_generate_correlation_id()
+        context_payload: Dict[str, Any] = dict(context) if context else {}
+        if details:
+            context_payload["details"] = details
+        if metadata:
+            context_payload["metadata"] = metadata
+        context_value = context_payload if context_payload else None
+
+        requires_review_flag = self._determine_requires_review(
+            action=action,
+            data_classification=data_classification,
+            requires_review_param=requires_review,
+        )
+
+        self._emit_audit_event_to_siem(
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            resource_name=resource_name,
+            user_id=user_id,
+            user_email=user_email,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            success=success,
+            data_classification=data_classification,
+            requires_review=requires_review_flag,
+            error_message=error_message,
+            context=context_value,
+            correlation_id=correlation_id,
+        )
+
+        # Check if database audit trail logging is enabled.
         if not settings.audit_trail_enabled:
             return None
-
-        correlation_id = get_or_generate_correlation_id()
 
         # Use provided session or create new one
         close_db = False
@@ -149,6 +186,27 @@ class AuditTrailService:
                 requires_review_param=requires_review,
             )
 
+            if auth_method is None or acting_as is None or delegation_chain is None:
+                try:
+                    # First-Party
+                    from mcpgateway.transports.context import user_identity_var  # pylint: disable=import-outside-toplevel
+
+                    identity = user_identity_var.get()
+                    if identity:
+                        if auth_method is None:
+                            auth_method = identity.auth_method
+                        if acting_as is None:
+                            acting_as = identity.service_account
+                        if delegation_chain is None and identity.delegation_chain:
+                            delegation_chain = {"chain": identity.delegation_chain}
+                except Exception as e:
+                    logger.debug(
+                        "Failed to extract user identity context for audit trail",
+                        extra={
+                            "error": str(e),
+                            "correlation_id": correlation_id,
+                        },
+                    )
             # Create audit trail entry
             audit_entry = AuditTrail(
                 timestamp=datetime.now(timezone.utc),
@@ -172,6 +230,9 @@ class AuditTrailService:
                 success=success,
                 error_message=error_message,
                 context=context_value,
+                auth_method=auth_method,
+                acting_as=acting_as,
+                delegation_chain=delegation_chain,
             )
 
             db.add(audit_entry)
@@ -222,6 +283,88 @@ class AuditTrailService:
             return True
 
         return False
+
+    def _emit_audit_event_to_siem(
+        self,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        resource_name: Optional[str],
+        user_id: str,
+        user_email: Optional[str],
+        client_ip: Optional[str],
+        user_agent: Optional[str],
+        success: bool,
+        data_classification: Optional[str],
+        requires_review: bool,
+        error_message: Optional[str],
+        context: Optional[Dict[str, Any]],
+        correlation_id: Optional[str],
+    ) -> None:
+        """Emit SIEM event for audit action (best-effort, non-blocking).
+
+        Args:
+            action: Audited action name.
+            resource_type: Resource type affected by the action.
+            resource_id: Resource identifier.
+            resource_name: Resource display name.
+            user_id: Actor user identifier.
+            user_email: Actor email address.
+            client_ip: Client IP address.
+            user_agent: Client user-agent string.
+            success: Whether operation succeeded.
+            data_classification: Data sensitivity classification.
+            requires_review: Whether action requires manual review.
+            error_message: Optional failure detail.
+            context: Additional action context payload.
+            correlation_id: Correlation identifier for request tracing.
+        """
+        siem_service = get_siem_export_service()
+        if not (getattr(settings, "siem_export_enabled", False) or siem_service.enabled or bool(siem_service.destinations)):
+            return
+
+        action_normalized = (action or "").upper()
+        if not success:
+            severity = "HIGH"
+        elif requires_review or (data_classification in {DataClassification.CONFIDENTIAL.value, DataClassification.RESTRICTED.value}):
+            severity = "MEDIUM"
+        else:
+            severity = "LOW"
+
+        description = f"Audit action {action_normalized} on {resource_type}/{resource_id}"
+        if resource_name:
+            description = f"{description} ({resource_name})"
+        if error_message:
+            description = f"{description}: {error_message}"
+
+        event_payload: Dict[str, Any] = {
+            "event_type": f"audit_{action_normalized.lower()}",
+            "severity": severity,
+            "category": "audit",
+            "description": description,
+            "user_id": user_id,
+            "user_email": user_email,
+            "client_ip": client_ip or "unknown",
+            "user_agent": user_agent,
+            "action_taken": "allowed" if success else "denied",
+            "threat_score": 0.6 if (not success or requires_review) else 0.1,
+            "context": {
+                "action": action_normalized,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "resource_name": resource_name,
+                "data_classification": data_classification,
+                "requires_review": requires_review,
+                "success": success,
+                "correlation_id": correlation_id,
+                **(context or {}),
+            },
+        }
+
+        try:
+            siem_service.submit_event(event=event_payload, source="audit")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("Failed to submit audit SIEM event: %s", exc)
 
     def log_crud_operation(
         self,

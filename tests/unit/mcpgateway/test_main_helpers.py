@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for mcpgateway.main helper functions."""
+"""Location: ./tests/unit/mcpgateway/test_main_helpers.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
+
+Unit tests for mcpgateway.main helper functions.
+"""
 
 # Standard
 import asyncio
@@ -56,39 +62,39 @@ def test_normalize_token_teams():
 def test_get_token_teams_from_request():
     # Teams with mixed formats (string and dict) → normalized to string IDs
     req = SimpleNamespace(state=SimpleNamespace(_jwt_verified_payload=("token", {"teams": ["t1", {"id": "t2"}]})))
-    assert main._get_token_teams_from_request(req) == ["t1", "t2"]
+    assert main.get_token_teams_from_request(req) == ["t1", "t2"]
 
     # Empty teams → public-only
     req.state._jwt_verified_payload = ("token", {"teams": []})
-    assert main._get_token_teams_from_request(req) == []
+    assert main.get_token_teams_from_request(req) == []
 
     # SECURITY: Null teams + non-admin → public-only (secure default)
     req.state._jwt_verified_payload = ("token", {"teams": None})
-    assert main._get_token_teams_from_request(req) == []
+    assert main.get_token_teams_from_request(req) == []
 
     # SECURITY: Null teams + admin → admin bypass (None)
     req.state._jwt_verified_payload = ("token", {"teams": None, "is_admin": True})
-    assert main._get_token_teams_from_request(req) is None
+    assert main.get_token_teams_from_request(req) is None
 
     # SECURITY: Missing teams key → public-only (secure default)
     req.state._jwt_verified_payload = ("token", {"sub": "user@example.com"})
-    assert main._get_token_teams_from_request(req) == []
+    assert main.get_token_teams_from_request(req) == []
 
     # SECURITY: No JWT → public-only (secure default)
     req.state._jwt_verified_payload = None
-    assert main._get_token_teams_from_request(req) == []
+    assert main.get_token_teams_from_request(req) == []
 
 
 def test_get_rpc_filter_context_admin_scoping():
     req = SimpleNamespace(state=SimpleNamespace(_jwt_verified_payload=("token", {"teams": [], "is_admin": True})))
     user = {"email": "user@example.com", "is_admin": True}
-    email, teams, is_admin = main._get_rpc_filter_context(req, user)
+    email, teams, is_admin = main.get_rpc_filter_context(req, user)
     assert email == "user@example.com"
     assert teams == []
     assert is_admin is False
 
     req.state._jwt_verified_payload = ("token", {"teams": ["t1"], "user": {"is_admin": True}})
-    email, teams, is_admin = main._get_rpc_filter_context(req, SimpleNamespace(email="obj@example.com"))
+    email, teams, is_admin = main.get_rpc_filter_context(req, SimpleNamespace(email="obj@example.com"))
     assert email == "obj@example.com"
     assert teams == ["t1"]
     assert is_admin is True
@@ -108,7 +114,7 @@ def test_jsonpath_modifier_invalid_expression(monkeypatch):
         raise ValueError("bad jsonpath")
 
     monkeypatch.setattr(main, "_parse_jsonpath", _raise)
-    with pytest.raises(HTTPException, match="Invalid main JSONPath expression"):
+    with pytest.raises(HTTPException, match="Invalid JSONPath expression"):
         main.jsonpath_modifier({"a": 1}, "$.a")
 
 
@@ -117,7 +123,7 @@ def test_transform_data_with_mappings_invalid_mapping(monkeypatch):
         raise ValueError("bad mapping")
 
     monkeypatch.setattr(main, "_parse_jsonpath", _raise)
-    with pytest.raises(HTTPException, match="Invalid mapping JSONPath"):
+    with pytest.raises(HTTPException, match="Invalid JSONPath expression for key"):
         main.transform_data_with_mappings([{"a": 1}], {"x": "$.a"})
 
 
@@ -127,7 +133,7 @@ def test_transform_data_with_mappings_execution_error(monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(main, "_parse_jsonpath", lambda _expr: _BadExpr())
-    with pytest.raises(HTTPException, match="Error executing mapping JSONPath"):
+    with pytest.raises(HTTPException, match="Error executing JSONPath expression for key"):
         main.transform_data_with_mappings([{"a": 1}], {"x": "$.a"})
 
 

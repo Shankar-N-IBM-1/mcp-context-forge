@@ -1,11 +1,17 @@
 name: sql-sanitizer E2E
 
 on:
-    push:
-        branches: [main]
     pull_request:
         branches: [main]
         types: [opened, synchronize, reopened]
+        paths:
+            - "mcpgateway/**"
+            - "plugins/**"
+            - "crates/sql-sanitizer/**"
+            - "mcp-servers/rust/fast-test-server/**"
+            - "pyproject.toml"
+            - "uv.lock"
+            - ".github/workflows/sql-sanitizer.yml"
     workflow_dispatch:
 
 permissions:
@@ -42,7 +48,7 @@ jobs:
                   python-version: "3.12"
 
             - name: Install uv
-              uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+              uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
               with:
                   enable-cache: true
 
@@ -113,7 +119,7 @@ jobs:
                   make venv
                   make install
                   make stop-serve
-                  make serve &
+                  make serve > gateway.log 2>&1 &
 
                   echo "Waiting for gateway to start..."
                   for i in {1..60}; do
@@ -292,6 +298,8 @@ jobs:
                   IS_ERROR=$(echo "$RESPONSE" | jq -r '.isError')
                   ERR_MSG=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
+                  cat gateway.log | grep sql_sanitizer
+
                   if [[ "$IS_ERROR" == "true" ]] && [[ "$ERR_MSG" == *"blocked by plugin SQLSanitizer"* ]]; then
                     echo "Success: SQLSanitizer blocked the 'DROP' command."
                   else
@@ -309,4 +317,5 @@ jobs:
                       fast-test-server.log
                       sql-sanitizer_output.json
                       sql-sanitizer_test.log
+                      gateway.log
                   retention-days: 7

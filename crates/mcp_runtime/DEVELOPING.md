@@ -97,7 +97,7 @@ Important behavior:
   selected ignores
   - it does **not** run Playwright
   - it does **not** run performance/compliance suites
-  - it now ignores `tests/e2e_rust/`, so Rust-mode-only live tests do not pollute
+  - it now ignores `tests/live_gateway/`, so live-infrastructure tests do not pollute
     the default backend test run
 - `make doctest` runs doctests against `mcpgateway/`
 - `make htmlcov` builds an HTML coverage report from `.coverage`
@@ -331,7 +331,8 @@ make diff-cover
 For Rust coverage:
 
 ```bash
-make -C crates/mcp_runtime coverage
+make rust-coverage
+make rust-diff-cover
 ```
 
 Coverage guidance:
@@ -340,8 +341,12 @@ Coverage guidance:
 - use `make coverage` when you need to regenerate the full Python coverage set
 - use `make diff-cover` when you need changed-line coverage against the main
   branch
-- use runtime-local `coverage` when you are explicitly improving Rust crate
-  coverage
+- use `make rust-coverage` when you need workspace Rust coverage with terminal,
+  HTML, and Cobertura XML reports
+- use `make rust-diff-cover` when you need Rust changed-line coverage against
+  the main branch
+- use runtime-local `make -C crates/mcp_runtime coverage` only when you are
+  explicitly improving that crate in isolation
 
 ## Benchmarking
 

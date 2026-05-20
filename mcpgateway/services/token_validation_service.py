@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/services/token_validation_service.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Akshay Shinde
 
@@ -73,9 +73,9 @@ class TokenValidationResult:
             >>> r.blocking_errors
             []
             >>> r.audience_match = False
-            >>> r.warnings.append("Token audience mismatch: token aud=[api://wrong], expected 'api://correct'")
+            >>> r.warnings.append("Token audience mismatch: token aud does not match expected resource or gateway URL")
             >>> r.blocking_errors
-            ["Token audience mismatch: token aud=[api://wrong], expected 'api://correct'"]
+            ['Token audience mismatch: token aud does not match expected resource or gateway URL']
         """
         if not self.warnings:
             return []
@@ -120,21 +120,29 @@ def _derive_issuer_from_token_url(token_url: str) -> Optional[str]:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _normalize_scope(scope_str: str) -> set:
-    """Normalize a scope string by stripping resource URI prefixes.
+def _normalize_scope(scope_input: Any) -> set[str]:
+    """Normalize a scope string or list by stripping resource URI prefixes.
 
     IdPs like Entra ID may return scopes as ``api://app-id/Scope.Name``
     while the gateway config stores the full URI form.  We compare both
     the full form and the short form (after the last ``/``).
 
     Args:
-        scope_str: Space-delimited scope string from the token.
+        scope_input: Space-delimited scope string or list of scopes from the token.
 
     Returns:
         Set of normalized scope names (both full and short forms).
     """
     scopes = set()
-    for s in scope_str.split():
+    # Handle both string (space-delimited) and list formats
+    if isinstance(scope_input, list):
+        scope_list = [s for s in scope_input if isinstance(s, str)]
+    elif isinstance(scope_input, str):
+        scope_list = scope_input.split()
+    else:
+        return scopes
+
+    for s in scope_list:
         scopes.add(s)
         # Also add the short form (after last '/')
         if "/" in s:
@@ -152,8 +160,8 @@ def _validate_audience(claims: Dict[str, Any], oauth_config: Dict[str, Any], gat
         gateway_name: Gateway name for log messages.
         result: Validation result to update in-place.
     """
-    expected_audience = oauth_config.get("resource") or gateway_url
-    if not expected_audience:
+    expected = oauth_config.get("resource") or gateway_url
+    if not expected:
         return
 
     token_aud = claims.get("aud")
@@ -161,14 +169,15 @@ def _validate_audience(claims: Dict[str, Any], oauth_config: Dict[str, Any], gat
         logger.debug("OAuth token for gateway %s has no 'aud' claim", gateway_name)
         return
 
+    # Normalize both sides to lists for a simple membership check.
+    # Per RFC 7519 Section 4.1.3, aud can be a string or array.
+    expected_list = expected if isinstance(expected, list) else [expected]
     aud_list = token_aud if isinstance(token_aud, list) else [token_aud]
-    if expected_audience in aud_list:
+    if any(a in expected_list for a in aud_list):
         result.audience_match = True
     else:
         result.audience_match = False
-        safe_aud = ", ".join(str(a)[:80] for a in aud_list[:3])
-        safe_expected = str(expected_audience)[:80]
-        result.warnings.append(f"Token audience mismatch: token aud=[{safe_aud}], expected '{safe_expected}'")
+        result.warnings.append("Token audience mismatch: token aud does not match expected resource or gateway URL")
 
 
 def _validate_scopes(claims: Dict[str, Any], oauth_config: Dict[str, Any], gateway_name: str, result: TokenValidationResult) -> None:
@@ -185,12 +194,16 @@ def _validate_scopes(claims: Dict[str, Any], oauth_config: Dict[str, Any], gatew
         return
 
     # Entra ID uses 'scp' claim; standard OAuth uses 'scope'
-    token_scope_str = claims.get("scope") or claims.get("scp") or ""
-    if not token_scope_str:
+    token_scope_value = claims.get("scope")
+    if token_scope_value is None:
+        token_scope_value = claims.get("scp")
+    if token_scope_value is None:
+        token_scope_value = ""  # nosec B105
+    if token_scope_value == "":  # nosec B105
         logger.debug("OAuth token for gateway %s has no 'scope'/'scp' claim", gateway_name)
         return
 
-    granted_scopes = _normalize_scope(token_scope_str)
+    granted_scopes = _normalize_scope(token_scope_value)
     missing = []
     for cfg_scope in configured_scopes:
         short = cfg_scope.rsplit("/", 1)[-1] if "/" in cfg_scope else cfg_scope

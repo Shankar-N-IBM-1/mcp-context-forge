@@ -1,11 +1,23 @@
 
 # cargo-vet audits file
 
+[[audits.ipnetwork]]
+who = "Mohan Lakshmaiah <mohan.economist@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.21.1"
+notes = "CIDR network parsing for backend URL validation SSRF protection. Reviewed for safe IP/CIDR parsing with no unsafe code or network I/O."
+
 [[audits.rustls-webpki]]
 who = "lucarlig <luca.carlig@ibm.com>"
 criteria = "safe-to-deploy"
 delta = "0.103.11 -> 0.103.12"
 notes = "Security patch update for RUSTSEC-2026-0098; reviewed upstream diff for URI name-constraint handling change."
+
+[[audits.rustls-webpki]]
+who = "prakhar-singh1928 <prakhar.singh1928@ibm.com>"
+criteria = "safe-to-deploy"
+delta = "0.103.12 -> 0.103.13"
+notes = "Security patch update for RUSTSEC-2026-0104; fixes reachable panic in CRL parsing for empty BIT STRING in IssuingDistributionPoint extension. Reviewed upstream diff - minimal change, only affects CRL parsing logic."
 
 [[trusted.aho-corasick]]
 criteria = "safe-to-deploy"
@@ -422,7 +434,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.js-sys]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-14"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"
@@ -1192,7 +1204,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.wasm-bindgen]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-14"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"
@@ -1206,7 +1218,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.wasm-bindgen-futures]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-14"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"
@@ -1220,7 +1232,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.wasm-bindgen-macro]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-14"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"
@@ -1234,7 +1246,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.wasm-bindgen-macro-support]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-14"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"
@@ -1248,7 +1260,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.wasm-bindgen-shared]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-15"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"
@@ -1262,7 +1274,7 @@ notes = "Trusted upstream maintainer for wasm and wasi ecosystem crates"
 
 [[trusted.web-sys]]
 criteria = "safe-to-deploy"
-user-id = 145038 # Guy Bedford (guybedford)
+user-id = 145038
 start = "2026-01-14"
 end = "2027-04-13"
 notes = "Trusted upstream maintainer for wasm-bindgen related crates in this graph"

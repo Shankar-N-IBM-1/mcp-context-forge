@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./mcpgateway/alembic/versions/add_oauth_tokens_table.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -31,8 +31,7 @@ def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     tables = inspector.get_table_names()
 
-    if "gateways" not in tables:
-        print("Fresh database detected. Skipping migration.")
+    if "oauth_tokens" in tables:
         return
 
     # Create oauth_tokens table

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./tests/unit/mcpgateway/test_main_error_handlers.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -9,28 +9,18 @@ Targets uncovered exception handlers in gateway, A2A, tool, and resource routes.
 """
 
 # Standard
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third-Party
 from fastapi.testclient import TestClient
-from pydantic import SecretStr, ValidationError
-from sqlalchemy.exc import IntegrityError
-from starlette.requests import Request
 import jwt
+from pydantic import SecretStr
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 # First-Party
 from mcpgateway.config import settings
-from mcpgateway.main import content_type_exception_handler
-from mcpgateway.services.content_security import ContentTypeError
-from mcpgateway.services.gateway_service import (
-    GatewayConnectionError,
-    GatewayDuplicateConflictError,
-    GatewayNameConflictError,
-    GatewayNotFoundError,
-)
+from mcpgateway.services.gateway_service import GatewayConnectionError, GatewayDuplicateConflictError, GatewayNameConflictError, GatewayNotFoundError
 
 TEST_JWT_SECRET = "unit-test-jwt-secret-key-with-minimum-32-bytes"
 
@@ -41,8 +31,15 @@ TEST_JWT_SECRET = "unit-test-jwt-secret-key-with-minimum-32-bytes"
 
 
 @pytest.fixture
-def test_client(app_with_temp_db):
-    """Return a TestClient with auth dependencies overridden."""
+def test_client(app_with_temp_db, main_app_with_admin_api):
+    """Return a TestClient with auth dependencies overridden.
+
+    Depends on ``main_app_with_admin_api`` to ensure the admin router
+    is mounted on ``mcpgateway.main.app`` so admin-prefixed routes
+    (e.g. ``/admin/prompts``) resolve. Without this dep, admin routes
+    are disabled by the conftest bootstrap and HTTP tests targeting
+    them get 404.
+    """
     # First-Party
     from mcpgateway.db import EmailUser
     from mcpgateway.middleware.rbac import get_current_user_with_permissions
@@ -575,6 +572,61 @@ class TestPromptServiceErrorHandlers:
             response = test_client.put("/prompts/test-id", json=prompt_data, headers=auth_headers)
             assert response.status_code == 403
 
+    def test_create_prompt_template_validation_error(self, test_client, auth_headers):
+        """Test TemplateValidationError handling in create_prompt endpoint by mocking service."""
+        # First-Party
+        from mcpgateway.services.content_security import TemplateValidationError
+
+        # Mock the prompt service to raise TemplateValidationError
+        with patch("mcpgateway.main.prompt_service.register_prompt", new_callable=AsyncMock) as mock_register:
+            mock_register.side_effect = TemplateValidationError(
+                template_name="test-invalid-prompt", reason="Template contains dangerous pattern that could lead to code injection", pattern=r"__import__"
+            )
+
+            request_data = {
+                "prompt": {
+                    "name": "test-invalid-prompt",
+                    "template": "Hello {{ name }}",
+                    "description": "Test prompt",
+                },
+                "team_id": None,
+                "visibility": "public",
+            }
+            response = test_client.post("/prompts/", json=request_data, headers=auth_headers)
+
+            # Should get 400 from TemplateValidationError handler
+            assert response.status_code == 400
+            assert "detail" in response.json()
+            detail = response.json()["detail"]
+            assert "Template validation failed" in detail["error"]
+            assert detail["template_name"] == "test-invalid-prompt"
+            assert detail["reason"] == "Template contains dangerous pattern that could lead to code injection"
+            assert detail["pattern"] == r"__import__"
+
+    def test_update_prompt_template_validation_error(self, test_client, auth_headers):
+        """Test TemplateValidationError handling in update_prompt endpoint by mocking service."""
+        # First-Party
+        from mcpgateway.services.content_security import TemplateValidationError
+
+        # Mock the prompt service to raise TemplateValidationError
+        with patch("mcpgateway.main.prompt_service.update_prompt", new_callable=AsyncMock) as mock_update:
+            mock_update.side_effect = TemplateValidationError(template_name="test-prompt", reason="Unbalanced template braces - check {{ }}, {% %}, or {# #} pairs")
+
+            update_data = {
+                "name": "test-prompt",
+                "template": "Hello {{ name }}",
+                "description": "Test prompt",
+            }
+            response = test_client.put("/prompts/test-id", json=update_data, headers=auth_headers)
+
+            # Should get 400 from TemplateValidationError handler
+            assert response.status_code == 400
+            assert "detail" in response.json()
+            detail = response.json()["detail"]
+            assert "Template validation failed" in detail["error"]
+            assert detail["template_name"] == "test-prompt"
+            assert "Unbalanced template braces" in detail["reason"]
+
 
 # --------------------------------------------------------------------------- #
 # Server Service Error Handler Tests                                           #
@@ -598,6 +650,13 @@ class TestServerServiceErrorHandlers:
 
 def test_content_type_exception_handler():
     """Test ContentTypeError exception handler returns 415 with proper format."""
+    # Third-Party
+    from starlette.requests import Request
+
+    # First-Party
+    from mcpgateway.main import content_type_exception_handler
+    from mcpgateway.services.content_security import ContentTypeError
+
     # Create a mock request
     mock_request = MagicMock(spec=Request)
 
@@ -605,14 +664,472 @@ def test_content_type_exception_handler():
     exc = ContentTypeError(mime_type="application/evil", allowed_types=["text/plain", "application/json", "text/html"])
 
     # Call the exception handler
+    # Standard
+    import asyncio
+
     response = asyncio.run(content_type_exception_handler(mock_request, exc))
 
     # Verify response
     assert response.status_code == 415
     content = response.body.decode()
+    # Standard
+    import json
+
     result = json.loads(content)
     assert "detail" in result
     assert result["detail"]["error"] == "Unsupported MIME type"
     assert result["detail"]["mime_type"] == "application/evil"
     assert "allowed_types" in result["detail"]
     assert len(result["detail"]["allowed_types"]) <= 5  # Limited to first 5
+
+
+def test_content_pattern_exception_handler():
+    """Test ContentPatternError exception handler returns 400 with proper format."""
+    # Third-Party
+    from starlette.requests import Request
+
+    # First-Party
+    from mcpgateway.main import content_pattern_error_handler
+    from mcpgateway.services.content_security import ContentPatternError
+
+    # Create a mock request
+    mock_request = MagicMock(spec=Request)
+
+    # Test with violation_type=None to trigger the "or 'unknown'" fallback (line 2374)
+    exc = ContentPatternError(pattern_matched="<script>", content_type="test content", violation_type=None)
+
+    # Call the exception handler
+    # Standard
+    import asyncio
+
+    response = asyncio.run(content_pattern_error_handler(mock_request, exc))
+
+    # Verify response
+    assert response.status_code == 400
+    content = response.body.decode()
+    # Standard
+    import json
+
+    result = json.loads(content)
+    assert "detail" in result
+    assert result["detail"]["error"] == "Malicious pattern detected"
+    assert result["detail"]["violation_type"] == "unknown"  # Should use fallback
+    assert result["detail"]["content_type"] == "test content"
+
+
+def test_template_validation_exception_handler():
+    """Test TemplateValidationError exception handler returns 400 with proper format."""
+    # Third-Party
+    from starlette.requests import Request
+
+    # First-Party
+    from mcpgateway.main import template_validation_exception_handler
+    from mcpgateway.services.content_security import TemplateValidationError
+
+    # Create a mock request
+    mock_request = MagicMock(spec=Request)
+
+    # Create a TemplateValidationError with pattern
+    exc_with_pattern = TemplateValidationError(template_name="test-template", reason="Dangerous pattern detected", pattern="__import__")
+
+    # Call the exception handler
+    # Standard
+    import asyncio
+
+    response = asyncio.run(template_validation_exception_handler(mock_request, exc_with_pattern))
+
+    # Verify response
+    assert response.status_code == 400
+    content = response.body.decode()
+    # Standard
+    import json
+
+    result = json.loads(content)
+    assert "detail" in result
+    assert result["detail"]["error"] == "Template validation failed"
+    assert result["detail"]["template_name"] == "test-template"
+    assert result["detail"]["reason"] == "Dangerous pattern detected"
+    # Pattern should NOT be included in response (CWE-209 fix - information disclosure)
+    assert "pattern" not in result["detail"]
+
+    # Test without pattern
+    exc_without_pattern = TemplateValidationError(template_name="test-template-2", reason="Unbalanced braces", pattern=None)
+
+    response2 = asyncio.run(template_validation_exception_handler(mock_request, exc_without_pattern))
+    assert response2.status_code == 400
+    content2 = response2.body.decode()
+    result2 = json.loads(content2)
+    assert "pattern" not in result2["detail"] or result2["detail"]["pattern"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Admin Template Validation Error Handler Tests                               #
+# --------------------------------------------------------------------------- #
+
+
+class TestAdminTemplateValidationErrorHandlers:
+    """Test TemplateValidationError handling in admin endpoints."""
+
+    def test_admin_add_prompt_template_validation_error(self, test_client, auth_headers):
+        """Test TemplateValidationError handling in admin_add_prompt endpoint."""
+        # First-Party
+        from mcpgateway.services.content_security import TemplateValidationError
+
+        # Mock the prompt service to raise TemplateValidationError
+        with patch("mcpgateway.admin.prompt_service.register_prompt", new_callable=AsyncMock) as mock_register:
+            mock_register.side_effect = TemplateValidationError(
+                template_name="admin-test-prompt", reason="Template contains dangerous pattern that could lead to code injection", pattern=r"__import__"
+            )
+
+            form_data = {
+                "name": "admin-test-prompt",
+                "template": "Hello {{ name }}",
+                "description": "Test prompt",
+            }
+            response = test_client.post("/admin/prompts", data=form_data, headers=auth_headers)
+
+            # Should get 400 from TemplateValidationError handler
+            assert response.status_code == 400
+            assert "message" in response.json()
+            content = response.json()
+            assert "Template validation failed" in content["message"]
+            assert content["template_name"] == "admin-test-prompt"
+            assert content["reason"] == "Template contains dangerous pattern that could lead to code injection"
+            assert content["pattern"] == r"__import__"
+
+    def test_admin_edit_prompt_template_validation_error(self, test_client, auth_headers):
+        """Test TemplateValidationError handling in admin_edit_prompt endpoint."""
+        # First-Party
+        from mcpgateway.services.content_security import TemplateValidationError
+
+        # Mock the prompt service to raise TemplateValidationError
+        with patch("mcpgateway.admin.prompt_service.update_prompt", new_callable=AsyncMock) as mock_update:
+            mock_update.side_effect = TemplateValidationError(template_name="admin-edit-prompt", reason="Unbalanced template braces - check {{ }}, {% %}, or {# #} pairs")
+
+            form_data = {
+                "name": "admin-edit-prompt",
+                "template": "Hello {{ name }}",  # Valid format, but service will raise error
+                "description": "Test prompt",
+            }
+            response = test_client.post("/admin/prompts/test-id/edit", data=form_data, headers=auth_headers)
+
+            # Should get 400 from TemplateValidationError handler
+            assert response.status_code == 400
+            assert "message" in response.json()
+            content = response.json()
+            assert "Template validation failed" in content["message"]
+            assert content["template_name"] == "admin-edit-prompt"
+            assert "Unbalanced template braces" in content["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Internal MCP Plugin Exception Tests (Issue #4103)                           #
+# --------------------------------------------------------------------------- #
+
+
+class TestInternalMcpPluginExceptions:
+    """Test plugin exception handling in internal MCP endpoints.
+
+    These tests verify the fix for Issue #4103, ensuring that plugin exceptions
+    return proper JSON-RPC format instead of being re-raised, which caused the
+    Rust runtime to fall back to Python execution.
+    """
+
+    @pytest.fixture
+    def mock_internal_auth(self):
+        """Mock internal MCP authentication helpers."""
+        with patch("mcpgateway.main._build_internal_mcp_forwarded_user") as mock_user, patch(
+            "mcpgateway.main.get_internal_mcp_auth_context"
+        ) as mock_auth, patch("mcpgateway.main.get_rpc_filter_context") as mock_filter, patch(
+            "mcpgateway.main._ensure_rpc_permission", new=AsyncMock()
+        ) as mock_perm, patch(
+            "mcpgateway.main._enforce_internal_mcp_server_scope"
+        ) as mock_scope:
+            mock_user.return_value = MagicMock(email="test@example.com")
+            mock_auth.return_value = {"is_authenticated": True}
+            mock_filter.return_value = ("test@example.com", [], False)
+            mock_scope.return_value = None
+            yield
+
+    def test_resolve_plugin_violation_returns_jsonrpc_format(self, test_client, mock_internal_auth):
+        """Resolve endpoint returns proper JSON-RPC format for PluginViolationError."""
+        # First-Party
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        # Setup: Mock prepare_rust_mcp_tool_execution to raise PluginViolationError
+        violation = PluginViolation(
+            reason="Access Denied",
+            description="User lacks required license",
+            code="LICENSE_CHECK_FAILED",
+            plugin_name="license_check",
+            mcp_error_code=-32602,
+            http_status_code=403,
+        )
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginViolationError("Plugin blocked tool execution", violation=violation)
+
+            # Execute: Call resolve endpoint
+            response = test_client.post(
+                "/_internal/mcp/tools/call/resolve",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 1},
+            )
+
+            # Verify: Response has complete JSON-RPC format
+            assert response.status_code == 403, f"Expected 403, got {response.status_code}"
+            content = response.json()
+
+            # CRITICAL: Must have "jsonrpc" field for Rust validation (lib.rs:8186-8188)
+            assert "jsonrpc" in content, "Missing 'jsonrpc' field - Rust will fallback to Python execution"
+            assert content["jsonrpc"] == "2.0", f"Expected 'jsonrpc': '2.0', got {content.get('jsonrpc')}"
+
+            # CRITICAL: Must have "error" field
+            assert "error" in content, "Missing 'error' field"
+            assert content["error"]["code"] == -32602, f"Expected error code -32602, got {content['error']['code']}"
+            assert "License" in content["error"]["message"] or "blocked" in content["error"]["message"]
+
+            # CRITICAL: Must have "id" field for JSON-RPC correlation
+            assert "id" in content, "Missing 'id' field - required for JSON-RPC correlation"
+            assert content["id"] == 1, f"Expected id 1, got {content.get('id')}"
+
+    def test_resolve_plugin_error_returns_jsonrpc_format(self, test_client, mock_internal_auth):
+        """Resolve endpoint returns proper JSON-RPC format for PluginError."""
+        # First-Party
+        from cpex.framework.errors import PluginError
+        from cpex.framework.models import PluginErrorModel
+
+        # Setup: Mock prepare_rust_mcp_tool_execution to raise PluginError
+        error = PluginErrorModel(
+            message="Plugin internal error",
+            plugin_name="test_plugin",
+            code="INTERNAL_ERROR",
+            mcp_error_code=-32603,
+        )
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginError(error=error)
+
+            # Execute: Call resolve endpoint
+            response = test_client.post(
+                "/_internal/mcp/tools/call/resolve",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 2},
+            )
+
+            # Verify: Response has complete JSON-RPC format
+            assert response.status_code == 500
+            content = response.json()
+
+            # CRITICAL: Must have "jsonrpc" field
+            assert "jsonrpc" in content
+            assert content["jsonrpc"] == "2.0"
+
+            # CRITICAL: Must have "error" field
+            assert "error" in content
+            assert content["error"]["code"] == -32603
+
+            # CRITICAL: Must have "id" field
+            assert "id" in content
+            assert content["id"] == 2
+
+    def test_call_plugin_violation_returns_jsonrpc_format(self, test_client, mock_internal_auth):
+        """Tools/call endpoint returns proper JSON-RPC format for PluginViolationError."""
+        # First-Party
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        violation = PluginViolation(
+            reason="Rate limit exceeded",
+            description="Too many requests",
+            code="RATE_LIMIT",
+            mcp_error_code=-32000,
+        )
+
+        with patch("mcpgateway.main.tool_service.invoke_tool") as mock_invoke:
+            mock_invoke.side_effect = PluginViolationError("Rate limited", violation=violation)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 4},
+            )
+
+            content = response.json()
+
+            # Verify JSON-RPC format (returns dict, not ORJSONResponse)
+            assert content["jsonrpc"] == "2.0"
+            assert "error" in content
+            assert content["error"]["code"] == -32000
+            assert content["id"] == 4
+
+    def test_call_plugin_error_returns_jsonrpc_format(self, test_client, mock_internal_auth):
+        """Tools/call endpoint returns proper JSON-RPC format for PluginError."""
+        # First-Party
+        from cpex.framework.errors import PluginError
+        from cpex.framework.models import PluginErrorModel
+
+        error = PluginErrorModel(
+            message="Plugin crashed",
+            plugin_name="test_plugin",
+            code="CRASH",
+            mcp_error_code=-32603,
+        )
+
+        with patch("mcpgateway.main.tool_service.invoke_tool") as mock_invoke:
+            mock_invoke.side_effect = PluginError(error=error)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 5},
+            )
+
+            content = response.json()
+
+            # Verify JSON-RPC format (returns dict, not ORJSONResponse)
+            assert content["jsonrpc"] == "2.0"
+            assert "error" in content
+            assert content["error"]["code"] == -32603
+            assert content["id"] == 5
+
+    def test_resolve_preserves_request_id(self, test_client, mock_internal_auth):
+        """Resolve endpoint preserves request ID from incoming JSON-RPC request."""
+        # First-Party
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        violation = PluginViolation(reason="test", description="test", code="TEST")
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginViolationError("test", violation=violation)
+
+            # Test with various ID types
+            for test_id in [1, "string-id", 12345]:
+                response = test_client.post(
+                    "/_internal/mcp/tools/call/resolve",
+                    json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": test_id},
+                )
+
+                content = response.json()
+                assert content["id"] == test_id, f"Expected id {test_id}, got {content.get('id')}"
+
+    def test_resolve_defaults_when_violation_has_no_codes(self, test_client, mock_internal_auth):
+        """Resolve endpoint uses default JSON-RPC code/status when violation lacks them."""
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        # Violation with no mcp_error_code or http_status_code
+        violation = PluginViolation(reason="Bad input", description="Missing field", code="VALIDATION_ERROR")
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginViolationError("Validation failed", violation=violation)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call/resolve",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 10},
+            )
+
+            assert response.status_code == 422  # Default status
+            content = response.json()
+            assert content["error"]["code"] == -32602  # Default JSON-RPC code
+            assert content["id"] == 10
+
+    def test_resolve_rejects_invalid_http_status_code(self, test_client, mock_internal_auth):
+        """Resolve endpoint falls back to 422 when plugin provides invalid HTTP status."""
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        violation = PluginViolation(
+            reason="Blocked",
+            description="Blocked by policy",
+            code="BLOCKED",
+            http_status_code=999,  # Invalid status
+        )
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginViolationError("Blocked", violation=violation)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call/resolve",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 11},
+            )
+
+            assert response.status_code == 422  # Falls back to default
+            content = response.json()
+            assert content["error"]["code"] == -32602
+            assert content["id"] == 11
+
+    def test_call_defaults_when_plugin_error_has_no_code(self, test_client, mock_internal_auth):
+        """Tools/call endpoint uses default JSON-RPC code when PluginError lacks mcp_error_code."""
+        from cpex.framework.errors import PluginError
+        from cpex.framework.models import PluginErrorModel
+
+        error = PluginErrorModel(message="Generic failure", plugin_name="test_plugin")
+        error.mcp_error_code = None  # Force handler fallback branch
+
+        with patch("mcpgateway.main.tool_service.invoke_tool") as mock_invoke:
+            mock_invoke.side_effect = PluginError(error=error)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 12},
+            )
+
+            content = response.json()
+            assert content["error"]["code"] == -32603  # Default internal error
+            assert content["id"] == 12
+
+    def test_resolve_forwards_validated_violation_headers(self, test_client, mock_internal_auth):
+        """Resolve endpoint forwards validated HTTP headers from plugin violations."""
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        violation = PluginViolation(
+            reason="Rate limited",
+            description="Too many requests",
+            code="RATE_LIMIT",
+            mcp_error_code=-32000,
+            http_status_code=429,
+            http_headers={"Retry-After": "60", "X-RateLimit-Limit": "100"},
+        )
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginViolationError("Rate limited", violation=violation)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call/resolve",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 13},
+            )
+
+            assert response.status_code == 429
+            assert response.headers.get("Retry-After") == "60"
+            assert response.headers.get("X-RateLimit-Limit") == "100"
+            content = response.json()
+            assert content["error"]["code"] == -32000
+            assert content["id"] == 13
+
+    def test_resolve_drops_invalid_violation_headers(self, test_client, mock_internal_auth):
+        """Resolve endpoint drops malformed HTTP headers from plugin violations."""
+        from cpex.framework.errors import PluginViolationError
+        from cpex.framework.models import PluginViolation
+
+        violation = PluginViolation(
+            reason="Blocked",
+            description="Blocked",
+            code="BLOCKED",
+            http_status_code=403,
+            http_headers={"Bad Header\x00Name": "value", "Valid-Header": "ok"},
+        )
+
+        with patch("mcpgateway.main.tool_service.prepare_rust_mcp_tool_execution") as mock_prepare:
+            mock_prepare.side_effect = PluginViolationError("Blocked", violation=violation)
+
+            response = test_client.post(
+                "/_internal/mcp/tools/call/resolve",
+                json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "test_tool"}, "id": 14},
+            )
+
+            assert response.status_code == 403
+            # Invalid header with null byte should be dropped, valid one kept
+            assert response.headers.get("Valid-Header") == "ok"
+            assert "Bad Header" not in dict(response.headers)  # Null byte header was dropped
+            content = response.json()
+            assert content["id"] == 14

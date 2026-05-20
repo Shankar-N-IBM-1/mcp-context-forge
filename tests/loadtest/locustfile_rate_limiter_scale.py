@@ -1,26 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Rate limiter algorithm scale test — resource divergence across algorithms.
+"""Location: ./tests/loadtest/locustfile_rate_limiter_scale.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
 
+Rate limiter algorithm scale test — resource divergence across algorithms.
 Why this test exists
 --------------------
 The algorithm comparison test (locustfile_rate_limiter_algorithms.py) uses a
 single user, which creates one Redis key per algorithm.  At that scale the
 memory difference between fixed_window (1 integer per key) and sliding_window
 (30 timestamps per key) is invisible — a few hundred bytes vs a single integer.
-
 This test uses many unique users so each one creates its own rate limit key.
 Redis memory diverges visibly as user count grows:
-
   fixed_window    1 key  per user  =   N integers          (O(N))
   sliding_window  1 key  per user  =   N × W timestamps    (O(N × W))
   token_bucket    1 hash per user  =   tokens + last_refill (~0.2 KiB/key)
-
 With 100 users and a 30/m limit (W=30 timestamps/window):
   fixed_window    ~100 Redis keys   → ~10 KB
   sliding_window  ~100 Redis keys   → ~30–90 KB  (sorted sets, ~30 entries each)
-
 At 1,000 users the gap becomes ~1 MB vs ~30 MB — clearly measurable.
-
 How it works
 ------------
   - N unique users (default 100), each with a distinct email identity
@@ -30,13 +29,11 @@ How it works
   - A background thread polls Redis memory (DBSIZE + INFO memory) every 10s
     and builds a timeline showing how memory grows as users are added
   - Results show: rate accuracy, gateway resources, and Redis memory timeline
-
 Run it the same way as the single-user test — just more users:
   docker exec mcp-context-forge-redis-1 redis-cli FLUSHDB
   RL_ALGORITHM=fixed_window make benchmark-rate-limiter-scale
   # restart gateways, flush Redis
   RL_ALGORITHM=sliding_window make benchmark-rate-limiter-scale
-
 Environment Variables
 ---------------------
   RL_ALGORITHM:           Algorithm (default: fixed_window)
@@ -52,9 +49,6 @@ Environment Variables
   JWT_ALGORITHM:          JWT algorithm (default: HS256)
   JWT_AUDIENCE:           JWT audience (default: mcpgateway-api)
   JWT_ISSUER:             JWT issuer (default: mcpgateway)
-
-Copyright 2026
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
@@ -291,6 +285,41 @@ def _scan_redis_pattern(pattern: str, timeout: int = 20) -> int:
         return 0
 
 
+def _scan_rl_dimension(dimension: str, timeout: int = 20) -> int:
+    """Count rate-limiter keys for a given dimension, regardless of tenant prefix.
+
+    After the tenant-scoping change in the gateway's tool-service (G1/G2 from
+    issue #4343), keys for team-owned tools land at
+    ``rl:{tenant_id}:{dimension}:{id}:{window}`` instead of
+    ``rl:{dimension}:{id}:{window}``. Single-tenant deployments keep the
+    unprefixed layout. Scan both so this test works before and after the
+    change, and against mixed deployments.
+    """
+    return _scan_redis_pattern(f"rl:{dimension}:*", timeout=timeout) + _scan_redis_pattern(f"rl:*:{dimension}:*", timeout=timeout)
+
+
+def _scan_rl_sample_keys(dimension: str, timeout: int = 15) -> list[str]:
+    """Return sample rate-limiter keys for a dimension, scanning both layouts.
+
+    Used by algorithm-detection to read a representative key's Redis data
+    type. Returns the union of unprefixed and tenant-prefixed keys.
+    """
+    keys: list[str] = []
+    for pattern in (f"rl:{dimension}:*", f"rl:*:{dimension}:*"):
+        try:
+            r = subprocess.run(
+                ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "--scan", "--pattern", pattern],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if r.returncode == 0:
+                keys.extend(line.strip() for line in r.stdout.splitlines() if line.strip())
+        except Exception:
+            continue
+    return keys
+
+
 def _poll_redis_once() -> dict[str, Any] | None:
     """Query Redis for key count and memory usage via docker exec.
 
@@ -308,8 +337,10 @@ def _poll_redis_once() -> dict[str, Any] | None:
         )
         total_keys = int(r_dbsize.stdout.strip()) if r_dbsize.returncode == 0 else 0
 
-        # RL-specific keys only (rl:user:* = per-user buckets, rl:tenant:* = per-team buckets)
-        rl_keys = _scan_redis_pattern("rl:user:*") + _scan_redis_pattern("rl:tenant:*")
+        # RL-specific keys only (per-user and per-team buckets). Scan both
+        # the unprefixed layout (rl:{dim}:*) and the tenant-prefixed layout
+        # (rl:{tenant}:{dim}:*) introduced by the G1/G2 fix in #4343.
+        rl_keys = _scan_rl_dimension("user") + _scan_rl_dimension("tenant")
 
         # INFO memory — used_memory in bytes
         r_mem = subprocess.run(
@@ -347,15 +378,9 @@ def _detect_algorithm_from_redis() -> str:
       hash    → token_bucket   (tokens + last_refill timestamp)
     """
     try:
-        r_scan = subprocess.run(
-            ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "--scan", "--pattern", "rl:user:*"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        sample_keys = [l.strip() for l in r_scan.stdout.splitlines() if l.strip()]
+        sample_keys = _scan_rl_sample_keys("user")
         if not sample_keys:
-            return f"unknown — no rl:user:* keys in Redis (expected for {RL_ALGORITHM}?)"
+            return f"unknown — no rl:user:* or rl:*:user:* keys in Redis " f"(expected for {RL_ALGORITHM}?)"
 
         r_type = subprocess.run(
             ["docker", "exec", DOCKER_REDIS_CONTAINER, "redis-cli", "TYPE", sample_keys[0]],

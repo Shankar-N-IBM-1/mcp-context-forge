@@ -13,25 +13,16 @@
 name: Tests & Coverage
 
 on:
-  push:
-    branches: ["main"]
-    # paths:
-    #   - "mcpgateway/**"
-    #   - "tests/**"
-    #   - "!tests/e2e_rust/**"
-    #   - "pyproject.toml"
-    #   - "uv.lock"
-    #   - ".github/workflows/pytest.yml"
   pull_request:
     types: [opened, synchronize, ready_for_review]
     branches: ["main"]
-    # paths:
-    #   - "mcpgateway/**"
-    #   - "tests/**"
-    #   - "!tests/e2e_rust/**"
-    #   - "pyproject.toml"
-    #   - "uv.lock"
-    #   - ".github/workflows/pytest.yml"
+    paths:
+      - "mcpgateway/**"
+      - "tests/**"
+      - "!tests/live_gateway/e2e_rust/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/pytest.yml"
   # schedule:
   #   - cron: '42 3 * * 1'   # Monday 03:42 UTC
 
@@ -81,7 +72,7 @@ jobs:
       # 2  Install uv
       # -----------------------------------------------------------
       - name: ⚡ Install uv
-        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.10.11"
           python-version: ${{ matrix.python }}
@@ -99,7 +90,6 @@ jobs:
           uv run --extra plugins pytest -n auto \
             --durations=10 \
             --ignore=tests/fuzz \
-            --ignore=tests/e2e/test_entra_id_integration.py \
             --cov=mcpgateway \
             --cov-report=xml \
             --cov-report=html \

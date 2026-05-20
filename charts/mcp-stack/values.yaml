@@ -85,7 +85,7 @@ mcpContextForge:
 
   image:
     repository: ghcr.io/ibm/mcp-context-forge
-    tag: latest                 # PRODUCTION: pin a specific immutable tag (e.g. "1.0.0-RC-3")
+    tag: latest                 # PRODUCTION: pin a specific immutable tag (e.g. "1.0.0")
     pullPolicy: IfNotPresent    # use Always only for dev/testing with mutable tags
 
   # Service that fronts the gateway
@@ -151,6 +151,22 @@ mcpContextForge:
     requests:
       cpu: 500m
       memory: 768Mi
+  # Pod security context - controls UID/GID for the container
+  # Default values align with the container image (UID 10001, GID 10001)
+  podSecurityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    runAsNonRoot: true
+
+  # Container security context - additional security constraints
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: false  # Set to true if app doesn't need write access
+
 
   # Optional ingress for HTTP traffic
   ingress:
@@ -385,6 +401,17 @@ mcpContextForge:
     # See CWE-598. Only use when upstream MCP server (e.g., Tavily) requires it.
     INSECURE_ALLOW_QUERYPARAM_AUTH: "false"  # query param auth disabled (CWE-598)
     # INSECURE_QUERYPARAM_AUTH_ALLOWED_HOSTS: "[]"  # only relevant when enabled
+
+    # ─ Identity Propagation ─
+    # Forward end-user identity (email, groups, roles) to upstream MCP servers.
+    # Supports HTTP headers (X-Forwarded-User-*) and MCP _meta field propagation.
+    # Can be overridden per-gateway via the identity_propagation JSON field.
+    IDENTITY_PROPAGATION_ENABLED: "false"      # master switch for identity propagation
+    IDENTITY_PROPAGATION_MODE: "both"          # headers, meta, or both
+    IDENTITY_PROPAGATION_HEADERS_PREFIX: "X-Forwarded-User" # prefix for identity HTTP headers
+    # IDENTITY_SENSITIVE_ATTRIBUTES: '["password_hash","internal_id","ssn"]' # attributes to strip
+    # IDENTITY_SIGN_CLAIMS: "false"            # HMAC-sign propagated claims for upstream verification
+    # IDENTITY_CLAIMS_SECRET: ""               # signing secret (uses JWT_SECRET_KEY if unset)
 
     # ─ SSRF Protection (Server-Side Request Forgery) ─
     # Prevents gateway from accessing internal resources or cloud metadata services.
@@ -869,7 +896,6 @@ mcpContextForge:
     # ─ OAuth Configuration ─
     OAUTH_REQUEST_TIMEOUT: "30"            # OAuth request timeout in seconds
     OAUTH_MAX_RETRIES: "3"                 # maximum retries for OAuth token requests
-    OAUTH_DEFAULT_TIMEOUT: "3600"          # default OAuth token timeout in seconds
 
     # ─ OAuth Dynamic Client Registration (DCR) & PKCE ─
     DCR_ENABLED: "true"                    # enable Dynamic Client Registration (RFC 7591)

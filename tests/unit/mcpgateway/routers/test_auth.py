@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./tests/unit/mcpgateway/routers/test_auth.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -8,6 +8,7 @@ Tests for the auth router module.
 """
 
 # Standard
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third-Party
@@ -15,7 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 # First-Party
-from mcpgateway.routers.auth import LoginRequest, get_db, login
+from mcpgateway.routers.auth import LoginRequest, get_csrf_token, get_db, login
 
 
 class TestLoginRequest:
@@ -242,6 +243,87 @@ class TestLogin:
             mock_service.authenticate_user.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_login_csrf_rotation_sets_cookie(self, mock_request, mock_db, mock_user):
+        """Test login with csrf_rotate_on_login=True sets CSRF cookie."""
+        with (
+            patch("mcpgateway.routers.auth.EmailAuthService") as mock_auth_service,
+            patch("mcpgateway.routers.auth.create_access_token", new_callable=AsyncMock) as mock_create_token,
+            patch("mcpgateway.config.settings") as mock_settings,
+            patch("jwt.decode", return_value={"jti": "session-123"}),
+            patch("mcpgateway.services.csrf_service.generate_csrf_token", return_value="csrf-token-123") as mock_generate,
+            patch("mcpgateway.services.csrf_service.set_csrf_cookie") as mock_set_cookie,
+        ):
+            mock_service = MagicMock()
+            mock_service.authenticate_user = AsyncMock(return_value=mock_user)
+            mock_auth_service.return_value = mock_service
+
+            mock_create_token.return_value = ("test_token", 3600)
+            mock_settings.csrf_rotate_on_login = True
+            mock_settings.csrf_secret_key = "secret"
+            mock_settings.csrf_token_expiry = 60
+
+            login_request = LoginRequest(email="test@example.com", password="password123")
+
+            response = await login(login_request, mock_request, mock_db)
+
+            assert response.status_code == 200
+            mock_generate.assert_called_once()
+            mock_set_cookie.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_csrf_token_success(self):
+        """Test CSRF token endpoint returns token and cookie."""
+        request = MagicMock()
+        request.state = SimpleNamespace(jti="session-123")
+        current_user = SimpleNamespace(email="test@example.com")
+
+        with (
+            patch("mcpgateway.config.settings") as mock_settings,
+            patch("mcpgateway.services.csrf_service.generate_csrf_token", return_value="csrf-token-123") as mock_generate,
+            patch("mcpgateway.services.csrf_service.set_csrf_cookie") as mock_set_cookie,
+        ):
+            mock_settings.csrf_secret_key = "secret"
+            mock_settings.csrf_token_expiry = 60
+
+            response = await get_csrf_token(request, current_user)
+
+            assert response.status_code == 200
+            assert response.body is not None
+            mock_generate.assert_called_once_with(user_id="test@example.com", session_id="session-123", secret="secret", expiry=60)
+            mock_set_cookie.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_csrf_token_missing_jti_raises_401(self):
+        """Test CSRF token endpoint rejects missing session id."""
+        request = MagicMock()
+        request.state = SimpleNamespace()
+        current_user = SimpleNamespace(email="test@example.com")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_csrf_token(request, current_user)
+
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_get_csrf_token_exception_raises_500(self):
+        """Test CSRF token endpoint handles unexpected errors."""
+        request = MagicMock()
+        request.state = SimpleNamespace(jti="session-123")
+        current_user = SimpleNamespace(email="test@example.com")
+
+        with (
+            patch("mcpgateway.routers.auth.settings") as mock_settings,
+            patch("mcpgateway.services.csrf_service.generate_csrf_token", side_effect=Exception("boom")),
+        ):
+            mock_settings.csrf_secret_key = "secret"
+            mock_settings.csrf_token_expiry = 60
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_csrf_token(request, current_user)
+
+        assert exc_info.value.status_code == 500
+
+    @pytest.mark.asyncio
     async def test_login_with_plain_username_fails(self, mock_request, mock_db):
         """Test login with plain username (no @) fails."""
         login_request = LoginRequest(username="plainuser", password="password123")
@@ -276,3 +358,64 @@ class TestLogin:
             assert exc_info.value.status_code == 400
             assert "restricted to admin accounts" in exc_info.value.detail
             mock_create_token.assert_not_called()
+
+
+class TestLogout:
+    """Tests for logout endpoint."""
+
+    @pytest.fixture
+    def mock_request(self):
+        """Create a mock FastAPI request with auth header."""
+        request = MagicMock()
+        request.headers = {"Authorization": "Bearer test_token_with_jti"}
+        return request
+
+    @pytest.fixture
+    def mock_db(self):
+        """Create a mock database session."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_current_user(self):
+        """Create a mock current user."""
+        user = SimpleNamespace()
+        user.email = "test@example.com"
+        user.id = "test-user-id"
+        return user
+
+    @pytest.mark.asyncio
+    async def test_logout_with_secret_str_jwt_key(self, mock_request, mock_db, mock_current_user):
+        """Test logout when jwt_secret_key is a SecretStr type (covers line 239)."""
+        from mcpgateway.routers.auth import logout
+
+        # Create a mock SecretStr
+        mock_secret_str = MagicMock()
+        mock_secret_str.get_secret_value.return_value = "test-secret-key"
+
+        with (
+            patch("mcpgateway.services.token_blocklist_service.get_token_blocklist_service") as mock_blocklist_service,
+            patch("mcpgateway.config.settings") as mock_settings,
+        ):
+            # Setup settings with SecretStr
+            mock_settings.jwt_secret_key = mock_secret_str
+            mock_settings.jwt_algorithm = "HS256"
+
+            # Setup blocklist service
+            mock_service = MagicMock()
+            mock_service.revoke_token.return_value = True
+            mock_blocklist_service.return_value = mock_service
+
+            # Mock jwt.decode inside the function
+            with patch("jwt.decode") as mock_jwt_decode:
+                mock_jwt_decode.return_value = {
+                    "jti": "test-jti-123",
+                    "exp": 1234567890,
+                    "iat": 1234567800,
+                }
+
+                response = await logout(mock_request, mock_current_user, mock_db)
+
+                assert response["message"] == "Logged out successfully"
+                assert response["revoked_token"] == "test-jti-123"
+                mock_secret_str.get_secret_value.assert_called_once()
+                mock_service.revoke_token.assert_called_once()

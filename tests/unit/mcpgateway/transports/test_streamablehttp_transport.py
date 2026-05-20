@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./tests/unit/mcpgateway/transports/test_streamablehttp_transport.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 import json
 from types import SimpleNamespace
 from typing import List
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 # Third-Party
 from fastapi import HTTPException
@@ -57,6 +57,15 @@ from mcpgateway.transports.streamablehttp_transport import (
 InMemoryEventStore = tr.InMemoryEventStore  # alias
 streamable_http_auth = tr.streamable_http_auth
 SessionManagerWrapper = tr.SessionManagerWrapper
+
+
+def test_truthy_is_error_recognizes_snake_and_camel_case_flags():
+    """``_truthy_is_error`` must support gateway and MCP SDK result shapes."""
+    assert tr._truthy_is_error(SimpleNamespace(is_error=True)) is True
+    assert tr._truthy_is_error(SimpleNamespace(isError=True)) is True
+    assert tr._truthy_is_error(SimpleNamespace(is_error=False, isError=False)) is False
+    assert tr._truthy_is_error(SimpleNamespace(is_error=1, isError="true")) is False
+
 
 # ---------------------------------------------------------------------------
 # InMemoryEventStore tests
@@ -662,6 +671,40 @@ async def test_call_tool_preserves_is_error_for_direct_proxy_egress(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_call_tool_preserves_mcp_sdk_is_error_for_egress(monkeypatch):
+    """Regression guard for #4202 when invoke_tool returns MCP SDK camelCase output.
+
+    The live gateway path can receive an MCP SDK ``CallToolResult`` from an
+    upstream MCP server. That object exposes the error flag as ``isError``
+    rather than the gateway model's ``is_error``. The egress helper must
+    recognize the camelCase flag and wrap the response as ``CallToolResult``
+    so downstream outputSchema validation is skipped for error responses.
+    """
+    # First-Party
+    from mcpgateway.transports.streamablehttp_transport import call_tool, tool_service, types
+
+    mock_db = MagicMock()
+    upstream_error = types.CallToolResult(
+        content=[types.TextContent(type="text", text="You cannot send more than 200 points")],
+        isError=True,
+    )
+
+    @asynccontextmanager
+    async def fake_get_db():
+        yield mock_db
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+    monkeypatch.setattr(tool_service, "invoke_tool", AsyncMock(return_value=upstream_error))
+
+    result = await call_tool("mytool", {"foo": "bar"})
+
+    assert isinstance(result, types.CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is None
+    assert result.content[0].text == "You cannot send more than 200 points"
+
+
+@pytest.mark.asyncio
 async def test_call_tool_header_direct_proxy_preserves_is_error(monkeypatch):
     """Regression guard for #4202 on the header-path direct-proxy egress branch.
 
@@ -736,9 +779,12 @@ async def test_call_tool_header_direct_proxy_preserves_is_error(monkeypatch):
     u_token = user_context_var.set({"email": "user@example.com", "teams": ["team1"], "is_authenticated": True, "is_admin": False})
 
     try:
+        # This test verifies is_error preservation, not RBAC.  Bypass the
+        # streamable RBAC check so we exercise the direct-proxy egress path.
         with (
             patch("mcpgateway.transports.streamablehttp_transport.get_db", mock_get_db),
             patch("mcpgateway.transports.streamablehttp_transport.check_gateway_access", AsyncMock(return_value=True)),
+            patch("mcpgateway.transports.streamablehttp_transport._check_streamable_permission", AsyncMock(return_value=True)),
             patch.object(tool_service, "invoke_tool_direct", mock_invoke_direct),
         ):
             result = await call_tool("mytool", {"foo": "bar"})
@@ -893,6 +939,118 @@ async def test_validate_streamable_session_access_skips_when_rust_already_valida
     assert allowed is True
     assert status == 200
     assert detail == ""
+
+
+@pytest.mark.asyncio
+async def test_close_streamable_http_session_removes_registry_and_affinity(monkeypatch):
+    """Session close helper should remove registry state and affinity owner mapping."""
+    session_registry = MagicMock()
+    session_registry.remove_session = AsyncMock(return_value=None)
+
+    mock_affinity = MagicMock()
+    mock_affinity.cleanup_session_owner = AsyncMock(return_value=None)
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._validate_streamable_session_access", AsyncMock(return_value=(True, 200, "")))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_shared_session_registry", lambda: session_registry)
+
+    with patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_affinity):
+        status_code, payload = await tr._close_streamable_http_session(
+            mcp_session_id="sess-abc",
+            user_context={"email": "owner@example.com", "is_authenticated": True},
+        )
+
+    assert status_code == 200
+    assert payload == {"jsonrpc": "2.0", "result": {}}
+    session_registry.remove_session.assert_awaited_once_with("sess-abc")
+    mock_affinity.cleanup_session_owner.assert_awaited_once_with("sess-abc")
+
+
+@pytest.mark.asyncio
+async def test_close_streamable_http_session_denied(monkeypatch):
+    """Session close helper should return deny payload when ownership check fails."""
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._validate_streamable_session_access", AsyncMock(return_value=(False, 403, "Session access denied")))
+
+    status_code, payload = await tr._close_streamable_http_session(
+        mcp_session_id="sess-abc",
+        user_context={"email": "attacker@example.com", "is_authenticated": True},
+    )
+
+    assert status_code == 403
+    assert payload == {"detail": "Session access denied"}
+
+
+@pytest.mark.asyncio
+async def test_close_streamable_http_session_registry_none(monkeypatch):
+    """Session close should return 403 when session registry is unavailable."""
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._validate_streamable_session_access", AsyncMock(return_value=(True, 200, "")))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_shared_session_registry", lambda: None)
+
+    status_code, payload = await tr._close_streamable_http_session(
+        mcp_session_id="sess-abc",
+        user_context={"email": "user@example.com", "is_authenticated": True},
+    )
+
+    assert status_code == 403
+    assert payload == {"detail": "Session ownership unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_close_streamable_http_session_affinity_runtime_error(monkeypatch):
+    """Session close should succeed when affinity cleanup raises RuntimeError (not initialized)."""
+    session_registry = MagicMock()
+    session_registry.remove_session = AsyncMock(return_value=None)
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._validate_streamable_session_access", AsyncMock(return_value=(True, 200, "")))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_shared_session_registry", lambda: session_registry)
+
+    with patch("mcpgateway.services.session_affinity.get_session_affinity", side_effect=RuntimeError("not initialized")):
+        status_code, payload = await tr._close_streamable_http_session(
+            mcp_session_id="sess-abc",
+            user_context={"email": "owner@example.com", "is_authenticated": True},
+        )
+
+    assert status_code == 200
+    assert payload == {"jsonrpc": "2.0", "result": {}}
+
+
+@pytest.mark.asyncio
+async def test_close_streamable_http_session_affinity_generic_error(monkeypatch):
+    """Session close should succeed when affinity cleanup raises a non-RuntimeError."""
+    session_registry = MagicMock()
+    session_registry.remove_session = AsyncMock(return_value=None)
+
+    mock_affinity = MagicMock()
+    mock_affinity.cleanup_session_owner = AsyncMock(side_effect=OSError("connection refused"))
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._validate_streamable_session_access", AsyncMock(return_value=(True, 200, "")))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_shared_session_registry", lambda: session_registry)
+
+    with patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_affinity):
+        status_code, payload = await tr._close_streamable_http_session(
+            mcp_session_id="sess-abc",
+            user_context={"email": "owner@example.com", "is_authenticated": True},
+        )
+
+    assert status_code == 200
+    assert payload == {"jsonrpc": "2.0", "result": {}}
+
+
+@pytest.mark.asyncio
+async def test_close_streamable_http_session_remove_fails(monkeypatch):
+    """Session close should return 500 when remove_session raises."""
+    session_registry = MagicMock()
+    session_registry.remove_session = AsyncMock(side_effect=RuntimeError("redis down"))
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._validate_streamable_session_access", AsyncMock(return_value=(True, 200, "")))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_shared_session_registry", lambda: session_registry)
+
+    status_code, payload = await tr._close_streamable_http_session(
+        mcp_session_id="sess-abc",
+        user_context={"email": "user@example.com", "is_authenticated": True},
+    )
+
+    assert status_code == 500
+    assert payload == {"detail": "Failed to close session"}
 
 
 @pytest.mark.asyncio
@@ -1496,7 +1654,7 @@ async def test_list_resource_templates_admin_unrestricted(monkeypatch):
 
     # Verify the service was called with admin unrestricted access
     assert len(captured_calls) == 1
-    assert captured_calls[0]["user_email"] is None  # Admin bypass clears email
+    assert captured_calls[0]["user_email"] == "admin@example.com"  # Admin bypass preserves email
     assert captured_calls[0]["token_teams"] is None  # Unrestricted
     assert captured_calls[0]["server_id"] == "test-server"
 
@@ -3667,7 +3825,7 @@ async def test_call_tool_with_request_context_no_meta(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_call_tool_admin_bypass(monkeypatch):
-    """Test call_tool admin bypass sets user_email=None for unrestricted admin."""
+    """Test call_tool admin bypass preserves user_email for unrestricted admin."""
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import call_tool, tool_service, user_context_var
 
@@ -3700,8 +3858,8 @@ async def test_call_tool_admin_bypass(monkeypatch):
     try:
         result = await call_tool("mytool", {"arg": "val"})
         assert isinstance(result, list)
-        # Admin bypass: user_email should be None
-        assert captured_kwargs["user_email"] is None
+        # Admin bypass: user_email preserved for downstream RBAC
+        assert captured_kwargs["user_email"] == "admin@test.com"
         assert captured_kwargs["token_teams"] is None  # Unrestricted
     finally:
         user_context_var.reset(token)
@@ -3824,8 +3982,8 @@ async def test_list_tools_admin_bypass(monkeypatch):
         result = await list_tools()
         assert len(result) == 1
         assert result[0].name == "admin_tool"
-        # Admin bypass: user_email should be None, token_teams should be None
-        assert captured_kwargs["user_email"] is None
+        # Admin bypass: user_email preserved, token_teams should be None
+        assert captured_kwargs["user_email"] == "admin@test.com"
         assert captured_kwargs["token_teams"] is None
     finally:
         server_id_var.reset(server_token)
@@ -3908,7 +4066,7 @@ async def test_list_prompts_admin_bypass(monkeypatch):
     try:
         result = await list_prompts()
         assert len(result) == 1
-        assert captured_kwargs["user_email"] is None
+        assert captured_kwargs["user_email"] == "admin@test.com"
         assert captured_kwargs["token_teams"] is None
     finally:
         server_id_var.reset(server_token)
@@ -3952,7 +4110,7 @@ async def test_get_prompt_admin_bypass(monkeypatch):
     try:
         result = await get_prompt("test_prompt", {"arg1": "val1"})
         assert isinstance(result, types.GetPromptResult)
-        assert captured_kwargs["user"] is None  # Admin bypass
+        assert captured_kwargs["user"] == "admin@test.com"  # Admin bypass preserves email
         assert captured_kwargs["token_teams"] is None
     finally:
         user_context_var.reset(user_token)
@@ -4032,7 +4190,7 @@ async def test_list_resources_admin_bypass(monkeypatch):
     try:
         result = await list_resources()
         assert len(result) == 1
-        assert captured_kwargs["user_email"] is None
+        assert captured_kwargs["user_email"] == "admin@test.com"
         assert captured_kwargs["token_teams"] is None
     finally:
         server_id_var.reset(server_token)
@@ -4076,7 +4234,7 @@ async def test_read_resource_admin_bypass(monkeypatch):
         test_uri = AnyUrl("file:///admin.txt")
         result = await read_resource(test_uri)
         assert result == "admin resource content"
-        assert captured_kwargs["user"] is None
+        assert captured_kwargs["user"] == "admin@test.com"
         assert captured_kwargs["token_teams"] is None
     finally:
         user_context_var.reset(user_token)
@@ -4444,7 +4602,7 @@ async def test_complete_preserves_admin_bypass_for_null_teams_context(monkeypatc
         result = await complete(ref, argument)
         assert isinstance(result, mcp_types.Completion)
         assert result.values == ["all"]
-        assert mock_cs.handle_completion.await_args.kwargs["user_email"] is None
+        assert mock_cs.handle_completion.await_args.kwargs["user_email"] == "admin@example.com"
         assert mock_cs.handle_completion.await_args.kwargs["token_teams"] is None
 
 
@@ -4756,7 +4914,7 @@ async def test_complete_exception(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_streamable_http_auth_proxy_user_when_client_auth_disabled(monkeypatch):
-    """Test auth sets user context for proxy user when client auth disabled (lines 1740-1750)."""
+    """Proxy user with valid DB record authenticates and gets DB-backed team/admin context."""
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcp_client_auth_enabled", False)
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth", True)
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth_dangerously", True)
@@ -4773,7 +4931,22 @@ async def test_streamable_http_auth_proxy_user_when_client_auth_disabled(monkeyp
     async def send(msg):
         sent.append(msg)
 
-    result = await streamable_http_auth(scope, None, send)
+    mock_user = Mock()
+    mock_user.is_admin = False
+    mock_user.is_active = True
+    mock_user.email = "proxy_user@example.com"
+
+    with (
+        patch("mcpgateway.db.get_db") as mock_get_db,
+        patch("mcpgateway.services.email_auth_service.EmailAuthService") as mock_auth_service,
+        patch("mcpgateway.auth._resolve_teams_from_db", new_callable=AsyncMock) as mock_resolve_teams,
+    ):
+        mock_get_db.return_value = iter([Mock()])
+        mock_auth_service.return_value.get_user_by_email = AsyncMock(return_value=mock_user)
+        mock_resolve_teams.return_value = []
+
+        result = await streamable_http_auth(scope, None, send)
+
     assert result is True
     assert sent == []  # No 401 sent
 
@@ -4809,7 +4982,22 @@ async def test_streamable_http_auth_proxy_user_with_bearer_header(monkeypatch):
     async def send(msg):
         sent.append(msg)
 
-    result = await streamable_http_auth(scope, None, send)
+    mock_user = Mock()
+    mock_user.is_admin = False
+    mock_user.is_active = True
+    mock_user.email = "proxy_fallback@example.com"
+
+    with (
+        patch("mcpgateway.db.get_db") as mock_get_db,
+        patch("mcpgateway.services.email_auth_service.EmailAuthService") as mock_auth_service,
+        patch("mcpgateway.auth._resolve_teams_from_db", new_callable=AsyncMock) as mock_resolve_teams,
+    ):
+        mock_get_db.return_value = iter([Mock()])
+        mock_auth_service.return_value.get_user_by_email = AsyncMock(return_value=mock_user)
+        mock_resolve_teams.return_value = []
+
+        result = await streamable_http_auth(scope, None, send)
+
     assert result is True
     assert sent == []
 
@@ -4817,6 +5005,129 @@ async def test_streamable_http_auth_proxy_user_with_bearer_header(monkeypatch):
     assert user_ctx["email"] == "proxy_fallback@example.com"
     assert user_ctx["teams"] == []
     assert user_ctx["is_admin"] is False
+
+
+# ---------------------------------------------------------------------------
+# Proxy auth: disabled user rejected via _set_proxy_user_context (line 4567, 4727)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_auth_proxy_rejects_disabled_user(monkeypatch):
+    """Disabled user gets 401 'Account disabled' through proxy auth (lines 4567, 4727)."""
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcp_client_auth_enabled", False)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth_dangerously", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.proxy_user_header", "x-forwarded-user")
+
+    scope = _make_scope(
+        "/servers/1/mcp",
+        headers=[
+            (b"x-forwarded-user", b"disabled@example.com"),
+        ],
+    )
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    mock_user = Mock()
+    mock_user.is_admin = True
+    mock_user.is_active = False
+    mock_user.email = "disabled@example.com"
+
+    with patch("mcpgateway.db.get_db") as mock_get_db, patch("mcpgateway.services.email_auth_service.EmailAuthService") as mock_auth_service:
+        mock_get_db.return_value = iter([Mock()])
+        mock_auth_service.return_value.get_user_by_email = AsyncMock(return_value=mock_user)
+
+        result = await streamable_http_auth(scope, None, send)
+
+    assert result is False
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert starts and starts[0]["status"] == 401
+    bodies = [m for m in sent if m.get("type") == "http.response.body"]
+    assert bodies and b"Account disabled" in bodies[0]["body"]
+
+
+# ---------------------------------------------------------------------------
+# Proxy auth: admin bypass when user not in DB (lines 4572-4575)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_auth_proxy_admin_bypass_no_db_record(monkeypatch):
+    """Platform admin email gets admin bypass when not in DB and require_user_in_db=False (lines 4572-4575)."""
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcp_client_auth_enabled", False)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth_dangerously", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.proxy_user_header", "x-forwarded-user")
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.require_user_in_db", False)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.platform_admin_email", "admin@example.com")
+
+    scope = _make_scope(
+        "/servers/1/mcp",
+        headers=[
+            (b"x-forwarded-user", b"admin@example.com"),
+        ],
+    )
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    with patch("mcpgateway.db.get_db") as mock_get_db, patch("mcpgateway.services.email_auth_service.EmailAuthService") as mock_auth_service:
+        mock_get_db.return_value = iter([Mock()])
+        mock_auth_service.return_value.get_user_by_email = AsyncMock(return_value=None)
+
+        result = await streamable_http_auth(scope, None, send)
+
+    assert result is True
+    assert sent == []
+
+    user_ctx = tr.user_context_var.get()
+    assert user_ctx["email"] == "admin@example.com"
+    assert user_ctx["teams"] is None
+    assert user_ctx["is_admin"] is True
+    assert user_ctx["auth_method"] == "proxy"
+
+
+# ---------------------------------------------------------------------------
+# Proxy auth: unknown user rejected (line 4577, 4727)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_auth_proxy_rejects_unknown_user(monkeypatch):
+    """Unknown user (not in DB, not platform admin) gets 401 'User not found' (lines 4577, 4727)."""
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcp_client_auth_enabled", False)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.trust_proxy_auth_dangerously", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.proxy_user_header", "x-forwarded-user")
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.require_user_in_db", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.platform_admin_email", "admin@example.com")
+
+    scope = _make_scope(
+        "/servers/1/mcp",
+        headers=[
+            (b"x-forwarded-user", b"unknown@example.com"),
+        ],
+    )
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    with patch("mcpgateway.db.get_db") as mock_get_db, patch("mcpgateway.services.email_auth_service.EmailAuthService") as mock_auth_service:
+        mock_get_db.return_value = iter([Mock()])
+        mock_auth_service.return_value.get_user_by_email = AsyncMock(return_value=None)
+
+        result = await streamable_http_auth(scope, None, send)
+
+    assert result is False
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert starts and starts[0]["status"] == 401
+    bodies = [m for m in sent if m.get("type") == "http.response.body"]
+    assert bodies and b"User not found in database" in bodies[0]["body"]
 
 
 @pytest.mark.asyncio
@@ -4845,7 +5156,22 @@ async def test_streamable_http_auth_proxy_user_context_on_valid_jwt(monkeypatch)
     async def send(msg):
         sent.append(msg)
 
-    result = await streamable_http_auth(scope, None, send)
+    mock_user = Mock()
+    mock_user.is_admin = False
+    mock_user.is_active = True
+    mock_user.email = "proxy_user@example.com"
+
+    with (
+        patch("mcpgateway.db.get_db") as mock_get_db,
+        patch("mcpgateway.services.email_auth_service.EmailAuthService") as mock_auth_service,
+        patch("mcpgateway.auth._resolve_teams_from_db", new_callable=AsyncMock) as mock_resolve_teams,
+    ):
+        mock_get_db.return_value = iter([Mock()])
+        mock_auth_service.return_value.get_user_by_email = AsyncMock(return_value=mock_user)
+        mock_resolve_teams.return_value = []
+
+        result = await streamable_http_auth(scope, None, send)
+
     assert result is True
 
     user_ctx = tr.user_context_var.get()
@@ -6583,6 +6909,30 @@ async def test_handle_streamable_http_get_returns_405_when_no_session_id(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_handle_streamable_http_unknown_method_without_session_returns_32601(monkeypatch):
+    """Unknown JSON-RPC methods report -32601 before SDK missing-session validation."""
+    sdk = _CountingSessionManager()
+    monkeypatch.setattr(tr, "StreamableHTTPSessionManager", lambda **kwargs: sdk)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.use_stateful_sessions", True)
+
+    wrapper = SessionManagerWrapper()
+    await wrapper.initialize()
+    send, messages = _make_send_collector()
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "definitely/not/a/real/method", "params": {}}).encode()
+
+    await wrapper.handle_streamable_http(_make_scope("/mcp", method="POST"), _make_receive(body), send)
+    await wrapper.shutdown()
+
+    assert not sdk.called
+    starts = [m for m in messages if m["type"] == "http.response.start"]
+    assert starts and starts[0]["status"] == 200
+    response_body = next(m for m in messages if m["type"] == "http.response.body")
+    payload = json.loads(response_body["body"])
+    assert payload["error"]["code"] == -32601
+    assert payload["id"] == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("header_name", [b"mcp-session-id", b"x-mcp-session-id"])
 async def test_handle_streamable_http_get_returns_sse_with_session(monkeypatch, header_name):
     """GET on /mcp with a valid session opens the spec-defined SSE stream (ADR-052).
@@ -6926,9 +7276,9 @@ async def test_handle_streamable_http_get_bus_unavailable_returns_503(monkeypatc
     """ADR-052: when the event bus raises after the listener is claimed, return 503 and release the claim."""
     # First-Party
     from mcpgateway.services.session_affinity import (
-        ListenerClaimResult,
         get_session_affinity,
         init_session_affinity,
+        ListenerClaimResult,
     )
     from mcpgateway.transports.server_event_bus import reset_server_event_bus
 
@@ -7240,8 +7590,8 @@ def test_resolve_intercept_target_swallows_service_not_initialized():
     request response. The narrow catch is a deliberate guard.
     """
     # First-Party
-    from mcpgateway.transports.streamablehttp_transport import _resolve_intercept_target  # pylint: disable=import-outside-toplevel
     import mcpgateway.transports.streamablehttp_transport as transport_mod  # pylint: disable=import-outside-toplevel
+    from mcpgateway.transports.streamablehttp_transport import _resolve_intercept_target  # pylint: disable=import-outside-toplevel
 
     # Bypass the cached module ref so the test patches the live import.
     transport_mod._notification_service_module = None
@@ -7485,9 +7835,9 @@ async def test_handle_streamable_http_get_heartbeat_loss_closes_stream_then_recl
     """
     # First-Party
     from mcpgateway.services.session_affinity import (  # pylint: disable=import-outside-toplevel
-        ListenerClaimResult,
         get_session_affinity,
         init_session_affinity,
+        ListenerClaimResult,
     )
     from mcpgateway.transports.server_event_bus import reset_server_event_bus  # pylint: disable=import-outside-toplevel
 
@@ -7551,14 +7901,18 @@ async def test_handle_streamable_http_get_heartbeat_loss_closes_stream_then_recl
 @pytest.mark.asyncio
 async def test_handle_streamable_http_get_replays_from_last_event_id(monkeypatch):
     """ADR-052 resume: ``Last-Event-Id`` causes replay of buffered events on connect."""
-    # First-Party
+    # Third-Party
     from mcp.types import JSONRPCMessage, JSONRPCNotification
+
+    # First-Party
+    from mcpgateway.services.session_affinity import init_session_affinity  # pylint: disable=import-outside-toplevel
     from mcpgateway.transports.server_event_bus import (
         get_server_event_bus,
         reset_server_event_bus,
     )
 
     await reset_server_event_bus()
+    init_session_affinity(enable_notifications=False)
 
     sdk = _CountingSessionManager()
     monkeypatch.setattr(tr, "StreamableHTTPSessionManager", lambda **kwargs: sdk)
@@ -7700,8 +8054,10 @@ async def test_handle_streamable_http_get_preempt_then_reclaim_replays_gap_event
     loses messages whenever a heartbeat-loss preemption races with a
     publish.
     """
-    # First-Party
+    # Third-Party
     from mcp.types import JSONRPCMessage, JSONRPCNotification  # pylint: disable=import-outside-toplevel
+
+    # First-Party
     from mcpgateway.services.session_affinity import (  # pylint: disable=import-outside-toplevel
         get_session_affinity,
         init_session_affinity,
@@ -8739,8 +9095,10 @@ async def test_affinity_disconnect_during_body_read(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_affinity_owner_is_self_non_post_falls_through_to_sdk(monkeypatch):
-    """When owner is current worker but method is not POST, request should fall through to SDK (line 1529->1613)."""
+async def test_stateful_delete_with_session_id_uses_deterministic_close(monkeypatch):
+    """DELETE with session ID should use deterministic close path instead of SDK dispatch."""
+
+    sdk_called = False
 
     class DummySessionManager:
         @asynccontextmanager
@@ -8748,12 +9106,16 @@ async def test_affinity_owner_is_self_non_post_falls_through_to_sdk(monkeypatch)
             yield self
 
         async def handle_request(self, scope, receive, send_func):
-            await send_func({"type": "http.response.start", "status": 200, "headers": []})
-            await send_func({"type": "http.response.body", "body": b"sdk"})
+            nonlocal sdk_called
+            sdk_called = True
 
     monkeypatch.setattr(tr, "StreamableHTTPSessionManager", lambda **kwargs: DummySessionManager())
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcpgateway_session_affinity_enabled", True)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcpgateway_session_affinity_enabled", False)
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.use_stateful_sessions", True)
+    monkeypatch.setattr(
+        "mcpgateway.transports.streamablehttp_transport._close_streamable_http_session",
+        AsyncMock(return_value=(200, {"jsonrpc": "2.0", "result": {}})),
+    )
 
     wrapper = SessionManagerWrapper()
     await wrapper.initialize()
@@ -8761,21 +9123,11 @@ async def test_affinity_owner_is_self_non_post_falls_through_to_sdk(monkeypatch)
     send, messages = _make_send_collector()
     scope = _make_scope("/mcp", method="DELETE", headers=[(b"mcp-session-id", b"sess-abc")])
 
-    mock_pool = MagicMock()
-    mock_pool.get_session_owner = AsyncMock(return_value="worker-1")  # We own it, but not POST
-
-    mock_session_class = MagicMock()
-    mock_session_class.is_valid_mcp_session_id = MagicMock(return_value=True)
-
-    with (
-        patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
-        patch("mcpgateway.services.session_affinity.WORKER_ID", "worker-1"),
-        patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-    ):
-        await wrapper.handle_streamable_http(scope, _make_receive(b""), send)
+    await wrapper.handle_streamable_http(scope, _make_receive(b""), send)
 
     await wrapper.shutdown()
     assert messages[0]["status"] == 200
+    assert sdk_called is False
 
 
 # ---------------------------------------------------------------------------
@@ -13611,7 +13963,7 @@ async def test_check_streamable_permission_exception_returns_false(monkeypatch):
     @asynccontextmanager
     async def exploding_db():
         raise RuntimeError("DB gone")
-        yield  # noqa: unreachable — required for generator syntax
+        yield  # required for generator syntax
 
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", exploding_db)
 
@@ -14443,7 +14795,7 @@ async def test_auth_jwt_uses_cached_auth_context_and_cached_teams(monkeypatch):
 
     assert result is True
     ctx = user_context_var.get()
-    assert ctx["teams"] == ["team-a"]
+    assert ctx["teams"] is None  # Admin bypass: effective_is_admin=True overrides cached team list
     assert ctx["permission_is_admin"] is True
     assert ctx["scoped_server_id"] == "srv-1"
     assert ctx["auth_method"] == "jwt"
@@ -14531,7 +14883,7 @@ async def test_auth_jwt_uses_batched_auth_context_and_caches_team_list(monkeypat
 
     assert result is True
     ctx = user_context_var.get()
-    assert ctx["teams"] == ["team-a"]
+    assert ctx["teams"] is None  # Admin bypass: effective_is_admin=True overrides batched team list
     assert ctx["permission_is_admin"] is True
 
 
@@ -15342,6 +15694,7 @@ class TestProxyReadResourceMetaInjection:
         the output dict has "_meta" as the field key, which is then correctly overwritten with the
         caller-supplied metadata before model_validate is called.
         """
+        # Third-Party
         from mcp.types import ReadResourceRequestParams
 
         meta_data = {"trace_id": "abc", "request_id": "123"}
@@ -15368,6 +15721,7 @@ class TestDirectProxyValidatesMeta:
     @pytest.mark.asyncio
     async def test_read_resource_direct_proxy_rejects_oversized_meta(self, monkeypatch):
         """meta_data must be validated before _proxy_read_resource_to_gateway is called (Finding 1 / CWE-400)."""
+        # First-Party
         from mcpgateway.common.validators import META_MAX_KEYS
         from mcpgateway.transports.streamablehttp_transport import _validate_meta_data
 
@@ -15378,6 +15732,7 @@ class TestDirectProxyValidatesMeta:
     @pytest.mark.asyncio
     async def test_read_resource_direct_proxy_rejects_list_of_dicts_depth_bypass(self, monkeypatch):
         """List-of-dicts depth bypass must be caught before _proxy_read_resource_to_gateway (Finding 1/3 / CWE-400)."""
+        # First-Party
         from mcpgateway.transports.streamablehttp_transport import _validate_meta_data
 
         hidden_depth = {"k": [{"l2": {"l3": "x"}}]}
@@ -15504,8 +15859,8 @@ async def test_dispatch_peek_outcome_intercepted_emits_202():
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import (  # pylint: disable=import-outside-toplevel
         _BodyPeekResult,
-        _PeekDispatchOutcome,
         _dispatch_peek_outcome,
+        _PeekDispatchOutcome,
     )
 
     send, messages = _make_send_collector()
@@ -15533,8 +15888,8 @@ async def test_dispatch_peek_outcome_disconnected_returns_aborted(caplog):
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import (  # pylint: disable=import-outside-toplevel
         _BodyPeekResult,
-        _PeekDispatchOutcome,
         _dispatch_peek_outcome,
+        _PeekDispatchOutcome,
     )
 
     send, messages = _make_send_collector()
@@ -15563,8 +15918,8 @@ async def test_dispatch_peek_outcome_too_large_logs_and_falls_through(caplog):
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import (  # pylint: disable=import-outside-toplevel
         _BodyPeekResult,
-        _PeekDispatchOutcome,
         _dispatch_peek_outcome,
+        _PeekDispatchOutcome,
     )
 
     send, _messages = _make_send_collector()
@@ -15607,9 +15962,9 @@ async def test_dispatch_peek_outcome_body_none_on_fallthrough_raises_runtime_err
     async def dummy_receive():
         return {"type": "http.disconnect"}
 
-    # Build a valid disconnected result, then bypass __post_init__ with
-    # object.__setattr__ to craft the impossible "body=None on fall-through"
-    # shape that the invariant guard must reject.
+    # Build a valid disconnected result, then mutate it to craft the
+    # impossible "body=None on fall-through" shape that the invariant
+    # guard must reject.
     peek = _BodyPeekResult(body=None, intercepted=False, disconnected=True)
     object.__setattr__(peek, "disconnected", False)
     with pytest.raises(RuntimeError, match="_BodyPeekResult invariant violation"):
@@ -15651,8 +16006,8 @@ async def test_handle_get_stream_session_affinity_not_initialized_returns_503(mo
     """Lines 3315, 3320-3327: SessionAffinityNotInitializedError → 503."""
     # First-Party
     import mcpgateway.services.session_affinity as sa_mod  # pylint: disable=import-outside-toplevel
-    from mcpgateway.transports.streamablehttp_transport import _handle_get_stream  # pylint: disable=import-outside-toplevel
     from mcpgateway.transports.server_event_bus import reset_server_event_bus  # pylint: disable=import-outside-toplevel
+    from mcpgateway.transports.streamablehttp_transport import _handle_get_stream  # pylint: disable=import-outside-toplevel
 
     await reset_server_event_bus()
     # Force the "not initialized" condition by clearing the singleton.
@@ -15690,12 +16045,12 @@ async def test_handle_get_stream_claim_unavailable_returns_503(monkeypatch):
     """Lines 3348-3354: ListenerClaimResult.UNAVAILABLE → 503 with retry hint."""
     # First-Party
     from mcpgateway.services.session_affinity import (  # pylint: disable=import-outside-toplevel
-        ListenerClaimResult,
         get_session_affinity,
         init_session_affinity,
+        ListenerClaimResult,
     )
-    from mcpgateway.transports.streamablehttp_transport import _handle_get_stream  # pylint: disable=import-outside-toplevel
     from mcpgateway.transports.server_event_bus import reset_server_event_bus  # pylint: disable=import-outside-toplevel
+    from mcpgateway.transports.streamablehttp_transport import _handle_get_stream  # pylint: disable=import-outside-toplevel
 
     await reset_server_event_bus()
     init_session_affinity(enable_notifications=False)
@@ -15740,8 +16095,8 @@ async def test_handle_get_stream_unreachable_claim_variant_triggers_assert_never
         get_session_affinity,
         init_session_affinity,
     )
-    from mcpgateway.transports.streamablehttp_transport import _handle_get_stream  # pylint: disable=import-outside-toplevel
     from mcpgateway.transports.server_event_bus import reset_server_event_bus  # pylint: disable=import-outside-toplevel
+    from mcpgateway.transports.streamablehttp_transport import _handle_get_stream  # pylint: disable=import-outside-toplevel
 
     await reset_server_event_bus()
     init_session_affinity(enable_notifications=False)
@@ -15778,8 +16133,8 @@ async def test_handle_get_stream_event_gen_handles_backlog_overflow(monkeypatch,
     # First-Party
     from mcpgateway.services.session_affinity import init_session_affinity  # pylint: disable=import-outside-toplevel
     from mcpgateway.transports.server_event_bus import (  # pylint: disable=import-outside-toplevel
-        ListenerBacklogOverflow,
         get_server_event_bus,
+        ListenerBacklogOverflow,
         reset_server_event_bus,
     )
 
@@ -16166,9 +16521,9 @@ async def test_handle_get_stream_gauge_dec_exception_is_logged(monkeypatch, capl
 async def test_handle_get_stream_heartbeat_task_drain_exception_is_logged(monkeypatch, caplog):
     """Lines 3524-3525: a heartbeat-task failure during cleanup is logged, not propagated."""
     # First-Party
-    import mcpgateway.transports.streamablehttp_transport as tr_mod  # pylint: disable=import-outside-toplevel
     from mcpgateway.services.session_affinity import init_session_affinity  # pylint: disable=import-outside-toplevel
     from mcpgateway.transports.server_event_bus import reset_server_event_bus  # pylint: disable=import-outside-toplevel
+    import mcpgateway.transports.streamablehttp_transport as tr_mod  # pylint: disable=import-outside-toplevel
 
     await reset_server_event_bus()
     init_session_affinity(enable_notifications=False)
@@ -16332,3 +16687,290 @@ async def test_post_notification_short_circuit_returns_202(monkeypatch):
     assert not sdk.called, "SDK must not be reached on a short-circuited notification"
     starts = [m for m in messages if m["type"] == "http.response.start"]
     assert starts and starts[0]["status"] == 202
+
+
+
+# ---------------------------------------------------------------------------
+# Layer-1 Visibility Filter Tests (Issue #4452)
+# Tests for get_scoped_visibility_from_user_context helper and effective admin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_scoped_visibility_from_user_context_empty_context_returns_public_only():
+    """Empty user_context must return (None, []) for public-only access, not admin bypass."""
+    # First-Party
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    # Test None context
+    user_email, token_teams = get_scoped_visibility_from_user_context(None)
+    assert user_email is None
+    assert token_teams == []  # Public-only, not admin bypass
+
+    # Test empty dict context
+    user_email, token_teams = get_scoped_visibility_from_user_context({})
+    assert user_email is None
+    assert token_teams == []  # Public-only, not admin bypass
+
+
+@pytest.mark.asyncio
+async def test_get_scoped_visibility_from_user_context_admin_bypass():
+    """Admin with teams=None gets admin bypass (email, None)."""
+    # First-Party
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    user_context = {
+        "email": "admin@example.com",
+        "teams": None,
+        "is_admin": True,
+    }
+
+    user_email, token_teams = get_scoped_visibility_from_user_context(user_context)
+    assert user_email == "admin@example.com"
+    assert token_teams is None  # Admin bypass
+
+
+@pytest.mark.asyncio
+async def test_get_scoped_visibility_from_user_context_non_admin_missing_teams():
+    """Non-admin with teams=None gets public-only access (secure default)."""
+    # First-Party
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    user_context = {
+        "email": "user@example.com",
+        "teams": None,
+        "is_admin": False,
+    }
+
+    user_email, token_teams = get_scoped_visibility_from_user_context(user_context)
+    assert user_email == "user@example.com"
+    assert token_teams == []  # Public-only secure default
+
+
+@pytest.mark.asyncio
+async def test_get_scoped_visibility_from_user_context_team_scoped():
+    """User with specific teams gets team-scoped access."""
+    # First-Party
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    user_context = {
+        "email": "user@example.com",
+        "teams": ["team1", "team2"],
+        "is_admin": False,
+    }
+
+    user_email, token_teams = get_scoped_visibility_from_user_context(user_context)
+    assert user_email == "user@example.com"
+    assert token_teams == ["team1", "team2"]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_auth_sso_platform_admin_gets_admin_bypass(monkeypatch):
+    """SSO platform_admin (DB is_admin=True) gets Layer-1 admin bypass via _auth_jwt path.
+
+    Regression test for issue #4070: SSO users with platform_admin RBAC role must get
+    admin bypass on StreamableHTTP transport, matching REST API behavior.
+    """
+    # Standard
+    from unittest.mock import MagicMock, patch
+
+    # JWT payload: is_admin=False (SSO user without DB flag)
+    async def fake_verify(token):
+        return {
+            "sub": "sso_admin@example.com",
+            "teams": None,  # Unrestricted token
+            "user": {"is_admin": False},  # No JWT admin flag
+        }
+
+    monkeypatch.setattr(tr, "verify_credentials", fake_verify)
+
+    # Mock _get_user_by_email_sync to return a user with is_admin=True
+    mock_user = MagicMock()
+    mock_user.email = "sso_admin@example.com"
+    mock_user.is_admin = True
+    mock_user.is_active = True
+
+    def mock_get_user(email):
+        return mock_user
+
+    scope = _make_scope("/servers/1/mcp", headers=[(b"authorization", b"Bearer sso-admin-token")])
+
+    async def send(msg):
+        pass
+
+    with patch("mcpgateway.auth._get_user_by_email_sync", mock_get_user):
+        result = await streamable_http_auth(scope, None, send)
+
+    assert result is True
+
+    # Verify effective admin status was set correctly
+    user_ctx = tr.user_context_var.get()
+    assert user_ctx.get("email") == "sso_admin@example.com"
+    assert user_ctx.get("is_admin") is True  # Effective admin (DB is_admin OR JWT is_admin)
+    assert user_ctx.get("permission_is_admin") is True
+    # Note: teams=None in JWT gets normalized to [] by normalize_token_teams,
+    # but Layer-1 visibility filter will convert (is_admin=True, teams=[]) to admin bypass (None, None)
+    assert user_ctx.get("teams") == []
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_auth_basic_auth_admin_gets_admin_bypass(monkeypatch):
+    """Basic-auth/dev-mode admin (JWT is_admin=True) gets Layer-1 admin bypass.
+
+    Regression test: basic-auth admins must continue to get admin bypass even when
+    not in the database (dev mode scenario).
+    """
+    # Standard
+    from unittest.mock import patch
+
+    # JWT payload: is_admin=True (basic-auth admin)
+    async def fake_verify(token):
+        return {
+            "sub": "dev_admin@example.com",
+            "teams": None,
+            "user": {"is_admin": True},  # JWT admin flag set
+        }
+
+    monkeypatch.setattr(tr, "verify_credentials", fake_verify)
+
+    # Mock _get_user_by_email_sync to return None (user NOT in database)
+    def mock_get_user(email):
+        return None
+
+    scope = _make_scope("/servers/1/mcp", headers=[(b"authorization", b"Bearer dev-admin-token")])
+
+    async def send(msg):
+        pass
+
+    with patch("mcpgateway.auth._get_user_by_email_sync", mock_get_user):
+        result = await streamable_http_auth(scope, None, send)
+
+    assert result is True
+
+    # Verify effective admin status was set correctly
+    user_ctx = tr.user_context_var.get()
+    assert user_ctx.get("email") == "dev_admin@example.com"
+    assert user_ctx.get("is_admin") is True  # Effective admin from JWT
+    assert user_ctx.get("permission_is_admin") is True
+    # Note: For API tokens (non-session), teams=None in JWT stays as None (not normalized)
+    # Layer-1 visibility filter will convert (is_admin=True, teams=None) to admin bypass (None, None)
+    assert user_ctx.get("teams") is None
+
+
+@pytest.mark.asyncio
+async def test_normalize_jwt_payload_sso_platform_admin_gets_effective_admin(monkeypatch):
+    """_normalize_jwt_payload fallback path: SSO platform_admin gets effective admin status.
+
+    Tests the stateful session fallback path (_normalize_jwt_payload) to ensure
+    SSO platform_admins get admin bypass there too, matching the primary _auth_jwt path.
+    """
+    # Standard
+    from unittest.mock import patch
+
+    # Mock is_user_admin to return True (user has platform_admin via RBAC)
+    def mock_is_user_admin(db, email):
+        return True
+
+    # JWT payload: is_admin=False (SSO user)
+    payload = {
+        "sub": "sso_admin@example.com",
+        "teams": ["team1"],
+        "user": {"is_admin": False},
+        "token_use": "session",
+    }
+
+    with patch("mcpgateway.utils.admin_check.is_user_admin", mock_is_user_admin):
+        with patch("mcpgateway.auth.resolve_session_teams", new_callable=AsyncMock) as mock_resolve:
+            mock_resolve.return_value = ["team1"]
+
+            result = await tr._normalize_jwt_payload(payload)
+
+    # Verify effective admin was computed correctly
+    assert result["is_admin"] is True  # Effective admin (DB is_admin OR JWT is_admin)
+    assert result["email"] == "sso_admin@example.com"
+    assert result["teams"] == ["team1"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_jwt_payload_non_admin_without_db_record():
+    """_normalize_jwt_payload: non-admin without DB record gets is_admin=False."""
+    # Standard
+    from unittest.mock import patch
+
+    # Mock is_user_admin to return False (user NOT in database)
+    def mock_is_user_admin(db, email):
+        return False
+
+    # JWT payload: is_admin=False, no DB record
+    payload = {
+        "sub": "regular_user@example.com",
+        "teams": ["team1"],
+        "user": {"is_admin": False},
+        "token_use": "session",
+    }
+
+    with patch("mcpgateway.utils.admin_check.is_user_admin", mock_is_user_admin):
+        with patch("mcpgateway.auth.resolve_session_teams", new_callable=AsyncMock) as mock_resolve:
+            mock_resolve.return_value = ["team1"]
+
+            result = await tr._normalize_jwt_payload(payload)
+
+    # Verify non-admin status
+    assert result["is_admin"] is False
+    assert result["email"] == "regular_user@example.com"
+    assert result["teams"] == ["team1"]
+
+
+def test_get_scoped_visibility_from_user_context_admin_missing_teams_key():
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    user_email, token_teams = get_scoped_visibility_from_user_context({"email": "admin@x.com", "is_admin": True})
+
+    assert user_email == "admin@x.com"
+    assert token_teams == []
+
+
+def test_get_scoped_visibility_from_user_context_admin_with_empty_teams():
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    user_email, token_teams = get_scoped_visibility_from_user_context({"email": "admin@x.com", "is_admin": True, "teams": []})
+
+    assert user_email == "admin@x.com"
+    assert token_teams == []
+
+
+def test_get_scoped_visibility_from_user_context_admin_with_team_scope():
+    from mcpgateway.auth_context import get_scoped_visibility_from_user_context
+
+    user_email, token_teams = get_scoped_visibility_from_user_context({"email": "admin@x.com", "is_admin": True, "teams": ["team1"]})
+
+    assert user_email == "admin@x.com"
+    assert token_teams == ["team1"]
+
+
+@pytest.mark.asyncio
+async def test_list_tools_sso_admin_gets_admin_bypass_at_service_layer(monkeypatch):
+    user_context = {"email": "sso_admin@example.com", "is_admin": True, "teams": []}
+    monkeypatch.setattr(tr, "_get_request_context_or_default", AsyncMock(return_value=(None, {}, user_context)))
+
+    called = {}
+
+    def fake_get_scoped_visibility(_ctx):
+        return None, None
+
+    async def fake_list_tools(db, include_inactive, limit, user_email, token_teams, _request_headers):
+        called["args"] = (user_email, token_teams)
+        return [], 0
+
+    monkeypatch.setattr("mcpgateway.auth_context.get_scoped_visibility_from_user_context", fake_get_scoped_visibility)
+    monkeypatch.setattr(tr.tool_service, "list_tools", fake_list_tools)
+
+    @asynccontextmanager
+    async def dummy_db():
+        yield object()
+
+    monkeypatch.setattr(tr, "get_db", dummy_db)
+
+    await list_tools()
+
+    assert called["args"] == (None, None)

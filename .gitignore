@@ -58,6 +58,8 @@ wheels/
 MANIFEST
 .Python
 *.so
+*.dylib
+*.dylib.yml
 
 !scripts/lib
 
@@ -126,7 +128,6 @@ snyk-helm-results.json
 aibom.json
 sbom-cyclonedx.json
 sbom-spdx.json
-
 # ========================================
 # Security reports
 # ========================================
@@ -199,7 +200,6 @@ aider*
 .ai*
 .bob
 .claude/*
-!.claude/skills/
 CLAUDE.local.md
 .continue
 
@@ -224,6 +224,7 @@ stats/
 # macOS
 # ========================================
 .DS_Store
+Info.plist
 
 # ========================================
 # Translations
@@ -277,6 +278,9 @@ mcpgateway/static/vendor/
 mcpgateway/static/bundle-*.js
 mcpgateway/static/.vite/
 public/
+
+# Generated Tailwind CSS (built during development or container build)
+mcpgateway/static/css/tailwind.min.css
 
 # Export & SBOM files
 mcpgateway-export*

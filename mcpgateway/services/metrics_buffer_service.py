@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Buffered metrics service for batching metric writes to the database.
+"""Location: ./mcpgateway/services/metrics_buffer_service.py
+Copyright 2026
+SPDX-License-Identifier: Apache-2.0
+Authors: Mihai Criveti
 
+Buffered metrics service for batching metric writes to the database.
 This service accumulates metrics in memory and flushes them to the database
 periodically, reducing DB write pressure under high load.
-
-Copyright 2025
-SPDX-License-Identifier: Apache-2.0
 """
 
 # Standard
@@ -580,6 +581,13 @@ class MetricsBufferService:
     ) -> None:
         """Write buffered metrics to database (runs in thread).
 
+        Each metric type is written in its own transaction so that a
+        foreign-key violation on one type (e.g., a ``tool_id`` whose row was
+        deleted between buffering and flushing) does not roll back unrelated
+        metrics.  ``fresh_db_session()`` commits on successful context exit
+        and rolls back on exception, so explicit ``db.commit()`` is not
+        needed inside the ``with`` blocks.
+
         Args:
             tool_metrics: List of buffered tool metrics to write.
             resource_metrics: List of buffered resource metrics to write.
@@ -587,10 +595,9 @@ class MetricsBufferService:
             server_metrics: List of buffered server metrics to write.
             a2a_agent_metrics: List of buffered A2A agent metrics to write.
         """
-        try:
-            with fresh_db_session() as db:
-                # Bulk insert tool metrics
-                if tool_metrics:
+        if tool_metrics:
+            try:
+                with fresh_db_session() as db:
                     db.bulk_insert_mappings(
                         ToolMetric,
                         [
@@ -604,9 +611,12 @@ class MetricsBufferService:
                             for m in tool_metrics
                         ],
                     )
+            except Exception as e:
+                logger.error(f"Failed to flush tool metrics to database: {e}", exc_info=True)
 
-                # Bulk insert resource metrics
-                if resource_metrics:
+        if resource_metrics:
+            try:
+                with fresh_db_session() as db:
                     db.bulk_insert_mappings(
                         ResourceMetric,
                         [
@@ -620,9 +630,12 @@ class MetricsBufferService:
                             for m in resource_metrics
                         ],
                     )
+            except Exception as e:
+                logger.error(f"Failed to flush resource metrics to database: {e}", exc_info=True)
 
-                # Bulk insert prompt metrics
-                if prompt_metrics:
+        if prompt_metrics:
+            try:
+                with fresh_db_session() as db:
                     db.bulk_insert_mappings(
                         PromptMetric,
                         [
@@ -636,9 +649,12 @@ class MetricsBufferService:
                             for m in prompt_metrics
                         ],
                     )
+            except Exception as e:
+                logger.error(f"Failed to flush prompt metrics to database: {e}", exc_info=True)
 
-                # Bulk insert A2A agent metrics
-                if a2a_agent_metrics:
+        if a2a_agent_metrics:
+            try:
+                with fresh_db_session() as db:
                     db.bulk_insert_mappings(
                         A2AAgentMetric,
                         [
@@ -653,18 +669,12 @@ class MetricsBufferService:
                             for m in a2a_agent_metrics
                         ],
                     )
+            except Exception as e:
+                logger.error(f"Failed to flush A2A agent metrics to database: {e}", exc_info=True)
 
-                db.commit()
-
-        except Exception as e:
-            logger.error(f"Failed to flush metrics to database: {e}", exc_info=True)
-            # Metrics are lost on failure - acceptable trade-off for performance
-            # Could implement retry queue if needed
-
-        # Flush server metrics in a separate transaction so that an invalid
-        # server_id (FK violation) does not roll back tool/resource/prompt/a2a
-        # metrics.  server_id can originate from untrusted headers (X-Server-ID)
-        # in admin API paths, so it may reference a nonexistent server.
+        # ``server_id`` can originate from untrusted headers (X-Server-ID) in
+        # admin API paths, so it may reference a nonexistent server.  Same
+        # isolation guarantee as the other metric types above.
         if server_metrics:
             try:
                 with fresh_db_session() as db:
@@ -681,7 +691,6 @@ class MetricsBufferService:
                             for m in server_metrics
                         ],
                     )
-                    db.commit()
             except Exception as e:
                 logger.error(f"Failed to flush server metrics to database: {e}", exc_info=True)
 
@@ -710,7 +719,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write tool metric: {e}")
 
@@ -739,7 +747,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write tool metric: {e}")
 
@@ -768,7 +775,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write resource metric: {e}")
 
@@ -797,7 +803,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write prompt metric: {e}")
 
@@ -826,7 +831,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write server metric: {e}")
 
@@ -855,7 +859,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write server metric: {e}")
 
@@ -887,7 +890,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write A2A agent metric: {e}")
 
@@ -919,7 +921,6 @@ class MetricsBufferService:
                     error_message=error_message,
                 )
                 db.add(metric)
-                db.commit()
         except Exception as e:
             logger.error(f"Failed to write A2A agent metric: {e}")
 

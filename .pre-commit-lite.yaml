@@ -40,7 +40,7 @@ repos:
         name: 🔐 Detect Private Key
         description: Detects the presence of private keys.
         types: [text]
-        exclude: 'mcpgateway/utils/generate_keys\.py|tests/unit/mcpgateway/plugins/framework/external/mcp/test_tls_utils.py|tests/unit/mcpgateway/utils/test_generate_keys.py'
+        exclude: 'mcpgateway/utils/generate_keys\.py|tests/unit/mcpgateway/plugins/framework/external/mcp/test_tls_utils.py|tests/unit/mcpgateway/utils/test_generate_keys.py|tests/unit/mcpgateway/test_oauth_manager\.py'
 
   # -----------------------------------------------------------------------------
   # ❌ Forbid Specific AI / LLM Patterns
@@ -514,7 +514,7 @@ repos:
     rev: 1.7.0  # or master if you're bold
     hooks:
       - id: interrogate
-        args: [--quiet, --fail-under=100]
+        args: [--fail-under=100]
         files: ^mcpgateway/
         exclude: _pb2(_grpc)?\.py$
 

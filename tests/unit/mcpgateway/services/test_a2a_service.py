@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Location: ./tests/unit/mcpgateway/services/test_a2a_service.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
@@ -9,9 +9,9 @@ Tests for A2A Agent Service functionality.
 
 # Standard
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-import json
 import uuid
 
 # Third-Party
@@ -23,10 +23,13 @@ from mcpgateway.cache.a2a_stats_cache import a2a_stats_cache
 from mcpgateway.config import settings
 from mcpgateway.db import A2AAgent as DbA2AAgent
 from mcpgateway.schemas import A2AAgentCreate, A2AAgentRead, A2AAgentUpdate
-from mcpgateway.services.rust_a2a_runtime import RustA2ARuntimeError
 from mcpgateway.services.a2a_service import A2AAgentError, A2AAgentNameConflictError, A2AAgentNotFoundError, A2AAgentService
 from mcpgateway.services.encryption_service import get_encryption_service
+from mcpgateway.services.rust_a2a_runtime import RustA2ARuntimeError
 from mcpgateway.utils.services_auth import encode_auth
+
+# Local
+from tests.helpers.admin_mocks import install_admin_user
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +46,28 @@ def mock_logging_services():
         mock_tool_logger.info = MagicMock(return_value=None)
         mock_tool_audit.log_action = MagicMock(return_value=None)
         yield {"structured_logger": mock_a2a_logger, "tool_logger": mock_tool_logger, "tool_audit": mock_tool_audit}
+
+
+@pytest.fixture(autouse=True)
+def bypass_uaid_security_for_tests(monkeypatch):
+    """Bypass UAID security validation for non-security tests.
+
+    This fixture uses autouse=True to globally disable UAID security checks
+    for all tests in this file. This is necessary because most tests focus on
+    A2A agent functionality rather than security validation, and the fail-closed
+    default (empty UAID_ALLOWED_DOMAINS) would cause all tests to fail.
+
+    Security-focused tests (e.g., TestCrossGatewayRoutingCoverage) override
+    this fixture to re-enable security validation and test allowlist behavior.
+
+    Uses monkeypatch instead of patch() to allow individual tests to override
+    specific settings without conflicts.
+    """
+    # Use monkeypatch to allow individual test overrides
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allow_all_domains", True)
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_forward_auth", True)
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_max_federation_hops", 5)
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.mcpgateway_a2a_default_timeout", 30)
 
 
 class TestA2AAgentService:
@@ -1016,30 +1041,50 @@ class TestA2AAgentService:
         assert result == {"t1": "One", "t2": "Two"}
         assert service._batch_get_team_names(mock_db, []) == {}
 
-    def test_check_agent_access_variants(self, service):
+    @pytest.mark.asyncio
+    async def test_check_agent_access_variants(self, service):
         """Test access control logic for agent visibility."""
+        mock_db = MagicMock()
         agent = SimpleNamespace(visibility="public", team_id="team-1", owner_email="owner@example.com")
 
-        assert service._check_agent_access(agent, user_email=None, token_teams=None) is True
-        assert service._check_agent_access(agent, user_email=None, token_teams=["x"]) is True
+        assert await service._check_agent_access(mock_db, agent, user_email=None, token_teams=None) is True
+        assert await service._check_agent_access(mock_db, agent, user_email=None, token_teams=["x"]) is True
 
         agent.visibility = "team"
         # Full admin bypass (both None) grants access to team agents
-        assert service._check_agent_access(agent, user_email=None, token_teams=None) is True
+        assert await service._check_agent_access(mock_db, agent, user_email=None, token_teams=None) is True
         # No user context (user_email=None) denies access to non-public agents
-        assert service._check_agent_access(agent, user_email=None, token_teams=["team-1"]) is False
-        # Admin bypass: token_teams=None grants access regardless of user_email
-        assert service._check_agent_access(agent, user_email="admin@example.com", token_teams=None) is True
+        assert await service._check_agent_access(mock_db, agent, user_email=None, token_teams=["team-1"]) is False
+        # Admin with token_teams=None gets access to team agents
+        assert await service._check_agent_access(mock_db, agent, user_email="admin@example.com", token_teams=None) is True
         # With user context, team membership grants access
-        assert service._check_agent_access(agent, user_email="someone@example.com", token_teams=["team-1"]) is True
-        assert service._check_agent_access(agent, user_email="someone@example.com", token_teams=["other"]) is False
+        assert await service._check_agent_access(mock_db, agent, user_email="someone@example.com", token_teams=["team-1"]) is True
+        assert await service._check_agent_access(mock_db, agent, user_email="someone@example.com", token_teams=["other"]) is False
 
         agent.visibility = "private"
         # Public-only tokens (token_teams=[]) cannot access private agents even as owner
-        assert service._check_agent_access(agent, user_email="owner@example.com", token_teams=[]) is False
+        assert await service._check_agent_access(mock_db, agent, user_email="owner@example.com", token_teams=[]) is False
         # Team-scoped tokens: owner can access their own private agents
-        assert service._check_agent_access(agent, user_email="owner@example.com", token_teams=["team-1"]) is True
-        assert service._check_agent_access(agent, user_email="other@example.com", token_teams=["team-1"]) is False
+        assert await service._check_agent_access(mock_db, agent, user_email="owner@example.com", token_teams=["team-1"]) is True
+        assert await service._check_agent_access(mock_db, agent, user_email="other@example.com", token_teams=["team-1"]) is False
+
+    @pytest.mark.asyncio
+    async def test_check_agent_access_db_admin_bypass_only_with_unrestricted_token(self, service):
+        """DB admin bypass with token_teams=None: own private allowed, other user's private denied (PR #4341)."""
+        other_users_private = SimpleNamespace(visibility="private", team_id="secret", owner_email="other@example.com")
+        own_private = SimpleNamespace(visibility="private", team_id="secret", owner_email="admin@example.com")
+        mock_db = MagicMock()
+        mock_db.info = {}
+        install_admin_user(mock_db, email="admin@example.com")
+
+        # token_teams=None + admin viewing OWN private → allowed (PR #4341 carve-out for self-access)
+        assert await service._check_agent_access(mock_db, own_private, user_email="admin@example.com", token_teams=None) is True
+        # token_teams=None + admin viewing OTHER user's private → denied (PR #4341 invariant)
+        assert await service._check_agent_access(mock_db, other_users_private, user_email="admin@example.com", token_teams=None) is False
+        # token_teams=["x"] → admin narrowed to team scope, cannot see non-team private
+        assert await service._check_agent_access(mock_db, other_users_private, user_email="admin@example.com", token_teams=["some-team"]) is False
+        # token_teams=[] → admin is public-only, cannot see private
+        assert await service._check_agent_access(mock_db, other_users_private, user_email="admin@example.com", token_teams=[]) is False
 
     def test_apply_visibility_filter(self, service):
         """Test visibility filter branches."""
@@ -2655,7 +2700,31 @@ class TestInvokeAgentEdgeCases:
     async def test_get_agent_card_returns_none_when_agent_missing(self, service, mock_db):
         mock_db.execute.return_value.scalar_one_or_none.return_value = None
 
-        assert service.get_agent_card(mock_db, "missing") is None
+        assert await service.get_agent_card(mock_db, "missing") is None
+
+    async def test_get_agent_card_returns_none_when_visibility_denies(self, service, mock_db):
+        """PR #4341 (S6-a) coverage: in-service gate returns None on visibility deny.
+
+        Exercises a2a_service.py:1155 — the deny path of the gate ``get_agent_card``
+        adopted in cycle 2. A private agent owned by a different user with the
+        anonymous-bypass shape must return None (not raise, not return the card).
+        """
+        agent = SimpleNamespace(
+            name="ag",
+            description="desc",
+            endpoint_url="https://x.com",
+            version=1,
+            protocol_version="1.0",
+            capabilities={},
+            visibility="private",
+            team_id=None,
+            owner_email="other@example.com",
+        )
+        mock_db.execute.return_value.scalar_one_or_none.return_value = agent
+
+        result = await service.get_agent_card(mock_db, "ag", user_email=None, token_teams=None)
+
+        assert result is None
 
     async def test_get_agent_card_builds_capabilities(self, service, mock_db):
         agent = SimpleNamespace(
@@ -2665,10 +2734,13 @@ class TestInvokeAgentEdgeCases:
             version=2,
             protocol_version="1.0",
             capabilities={"streaming": True, "pushNotifications": True, "stateTransitionHistory": False, "skills": [{"id": "s1"}]},
+            visibility="public",
+            team_id=None,
+            owner_email=None,
         )
         mock_db.execute.return_value.scalar_one_or_none.return_value = agent
 
-        result = service.get_agent_card(mock_db, "ag")
+        result = await service.get_agent_card(mock_db, "ag")
 
         assert result["name"] == "ag"
         assert result["capabilities"]["streaming"] is True
@@ -3680,14 +3752,15 @@ class TestCancelTask:
         q.all.return_value = [task] if task is not None else []
         return q
 
-    def test_cancel_active_task(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_active_task(self, service, mock_db):
         """Task found in non-terminal state is set to canceled and returned as wire dict."""
         task = self._make_task("submitted")
         mock_db.query.return_value = self._mock_task_query(task)
         mock_db.commit = MagicMock()
         mock_db.refresh = MagicMock()
 
-        result = service.cancel_task(mock_db, "task-1")
+        result = await service.cancel_task(mock_db, "task-1")
 
         assert task.state == "canceled"
         mock_db.commit.assert_called_once()
@@ -3695,27 +3768,30 @@ class TestCancelTask:
         assert result["id"] == "task-1"
         assert result["status"]["state"] == "canceled"
 
-    def test_cancel_already_terminal_task(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_already_terminal_task(self, service, mock_db):
         """Task already in terminal state is returned as-is without modification."""
         task = self._make_task("completed")
         mock_db.query.return_value = self._mock_task_query(task)
 
-        result = service.cancel_task(mock_db, "task-1")
+        result = await service.cancel_task(mock_db, "task-1")
 
         assert task.state == "completed"
         mock_db.commit.assert_not_called()
         assert result["id"] == "task-1"
         assert result["status"]["state"] == "completed"
 
-    def test_cancel_task_not_found_returns_none(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_task_not_found_returns_none(self, service, mock_db):
         """Returns None when the task does not exist."""
         mock_db.query.return_value = self._mock_task_query(None)
 
-        result = service.cancel_task(mock_db, "missing-task")
+        result = await service.cancel_task(mock_db, "missing-task")
 
         assert result is None
 
-    def test_cancel_task_with_agent_id_filter(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_task_with_agent_id_filter(self, service, mock_db):
         """agent_id parameter adds an extra filter clause."""
         task = self._make_task("submitted")
         mock_query = self._mock_task_query(task)
@@ -3723,12 +3799,13 @@ class TestCancelTask:
         mock_db.commit = MagicMock()
         mock_db.refresh = MagicMock()
 
-        service.cancel_task(mock_db, "task-1", agent_id="agent-1")
+        await service.cancel_task(mock_db, "task-1", agent_id="agent-1")
 
         # filter called: task_id, agent_id, and agent visibility lookup
         assert mock_query.filter.call_count >= 2
 
-    def test_cancel_ambiguous_task_without_agent_id_returns_none(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_ambiguous_task_without_agent_id_returns_none(self, service, mock_db):
         """Two rows with the same ``task_id`` and no ``agent_id`` filter must refuse to guess."""
         task_a = self._make_task("submitted")
         task_a.a2a_agent_id = "agent-a"
@@ -3741,7 +3818,7 @@ class TestCancelTask:
         q.all.return_value = [task_a, task_b]
         mock_db.query.return_value = q
 
-        result = service.cancel_task(mock_db, "shared-task-id")
+        result = await service.cancel_task(mock_db, "shared-task-id")
         assert result is None
         # task_a must not have been cancelled by a "first match wins" policy.
         assert task_a.state == "submitted"
@@ -3755,7 +3832,8 @@ class TestCancelTask:
         mock_agent_q.first.return_value = agent
         mock_db.query.side_effect = [mock_task_q, mock_agent_q]
 
-    def test_cancel_task_hidden_from_wrong_team(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_task_hidden_from_wrong_team(self, service, mock_db):
         """Team-scoped user cannot cancel tasks on a different team's agent."""
         task = self._make_task("submitted")
         agent = MagicMock()
@@ -3764,11 +3842,12 @@ class TestCancelTask:
         agent.owner_email = "other@test.com"
         self._setup_task_and_agent(mock_db, task, agent)
 
-        result = service.cancel_task(mock_db, "task-1", user_email="user@test.com", token_teams=["team-a"])
+        result = await service.cancel_task(mock_db, "task-1", user_email="user@test.com", token_teams=["team-a"])
         assert result is None
 
-    def test_cancel_task_admin_bypass(self, service, mock_db):
-        """Admin can cancel any task regardless of visibility."""
+    @pytest.mark.asyncio
+    async def test_cancel_task_admin_bypass_denies_private(self, service, mock_db):
+        """SECURITY: admin bypass cannot cancel tasks on private agents (Layer 1 visibility applies)."""
         task = self._make_task("submitted")
         agent = MagicMock()
         agent.visibility = "private"
@@ -3777,11 +3856,27 @@ class TestCancelTask:
         mock_db.commit = MagicMock()
         mock_db.refresh = MagicMock()
 
-        result = service.cancel_task(mock_db, "task-1", user_email=None, token_teams=None)
+        result = await service.cancel_task(mock_db, "task-1", user_email=None, token_teams=None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_task_admin_bypass_allows_team(self, service, mock_db):
+        """Admin bypass can cancel tasks on team agents (only private is denied)."""
+        task = self._make_task("submitted")
+        agent = MagicMock()
+        agent.visibility = "team"
+        agent.team_id = "team-a"
+        agent.owner_email = "other@test.com"
+        self._setup_task_and_agent(mock_db, task, agent)
+        mock_db.commit = MagicMock()
+        mock_db.refresh = MagicMock()
+
+        result = await service.cancel_task(mock_db, "task-1", user_email=None, token_teams=None)
         assert result is not None
         assert result["status"]["state"] == "canceled"
 
-    def test_cancel_task_public_only_user_denied_for_private(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_cancel_task_public_only_user_denied_for_private(self, service, mock_db):
         """Public-only user (empty teams) cannot cancel private agent tasks."""
         task = self._make_task("submitted")
         agent = MagicMock()
@@ -3789,8 +3884,24 @@ class TestCancelTask:
         agent.owner_email = "user@test.com"
         self._setup_task_and_agent(mock_db, task, agent)
 
-        result = service.cancel_task(mock_db, "task-1", user_email="user@test.com", token_teams=[])
+        result = await service.cancel_task(mock_db, "task-1", user_email="user@test.com", token_teams=[])
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_task_hidden_when_agent_deleted(self, service, mock_db):
+        """If the owning agent was deleted, cancel_task returns None (fail-closed per PR #4341)."""
+        task = self._make_task("submitted")
+        mock_task_q = self._mock_task_query(task)
+        mock_agent_q = MagicMock()
+        mock_agent_q.filter.return_value = mock_agent_q
+        mock_agent_q.first.return_value = None
+        mock_db.query.side_effect = [mock_task_q, mock_agent_q]
+        mock_db.commit = MagicMock()
+        mock_db.refresh = MagicMock()
+
+        result = await service.cancel_task(mock_db, "task-1", user_email="user@test.com", token_teams=["team-a"])
+        assert result is None
+        mock_db.commit.assert_not_called()
 
 
 class TestPushConfigCRUD:
@@ -4285,11 +4396,11 @@ class TestPushConfigCRUD:
         assert rows[0]["auth_token"] == "live-secret"  # pragma: allowlist secret
         assert rows[0]["webhook_url"] == "https://example.com/webhook"
 
-    def test_list_push_configs_for_dispatch_admin_bypass_skips_visibility_filter(self, service, mock_db):
-        """Admin (user_email=None, token_teams=None) must not scope by ``_visible_agent_ids``.
+    def test_list_push_configs_for_dispatch_admin_bypass_applies_visibility_filter(self, service, mock_db):
+        """Admin bypass now scopes dispatch rows to public + team visibility.
 
-        An admin listing for dispatch should see every row without paying
-        the cost of a preliminary agent-id scan.
+        The admin path still consults ``_visible_agent_ids`` and applies the
+        resulting visibility filter instead of returning every row unscoped.
         """
         cfg = MagicMock()
         cfg.id = "cfg-1"
@@ -4607,31 +4718,46 @@ class TestCheckAgentAccessById:
     def mock_db(self):
         return MagicMock(spec=Session)
 
-    def test_deleted_agent_returns_false(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_deleted_agent_returns_false(self, service, mock_db):
         """Non-existent agent ID returns False (fail-closed)."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
-        assert service._check_agent_access_by_id(mock_db, "deleted-id", "user@test.com", ["team1"]) is False
+        assert await service._check_agent_access_by_id(mock_db, "deleted-id", "user@test.com", ["team1"]) is False
 
-    def test_public_agent_returns_true(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_public_agent_returns_true(self, service, mock_db):
         agent = MagicMock()
         agent.visibility = "public"
         mock_db.query.return_value.filter.return_value.first.return_value = agent
-        assert service._check_agent_access_by_id(mock_db, "agent-1", "user@test.com", ["team1"]) is True
+        assert await service._check_agent_access_by_id(mock_db, "agent-1", "user@test.com", ["team1"]) is True
 
-    def test_private_agent_wrong_owner_returns_false(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_private_agent_wrong_owner_returns_false(self, service, mock_db):
         agent = MagicMock()
         agent.visibility = "private"
         agent.owner_email = "other@test.com"
         agent.team_id = "team1"
         mock_db.query.return_value.filter.return_value.first.return_value = agent
-        assert service._check_agent_access_by_id(mock_db, "agent-1", "user@test.com", ["team1"]) is False
+        assert await service._check_agent_access_by_id(mock_db, "agent-1", "user@test.com", ["team1"]) is False
 
-    def test_admin_bypass_returns_true(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_admin_bypass_denies_private(self, service, mock_db):
+        """SECURITY: admin bypass (user_email=None, token_teams=None) must NOT grant access to private agents."""
         agent = MagicMock()
         agent.visibility = "private"
         agent.owner_email = "other@test.com"
         mock_db.query.return_value.filter.return_value.first.return_value = agent
-        assert service._check_agent_access_by_id(mock_db, "agent-1", None, None) is True
+        assert await service._check_agent_access_by_id(mock_db, "agent-1", None, None) is False
+
+    @pytest.mark.asyncio
+    async def test_admin_bypass_allows_team(self, service, mock_db):
+        """Admin bypass grants access to team agents (only private is denied)."""
+        agent = MagicMock()
+        agent.visibility = "team"
+        agent.team_id = "team-a"
+        agent.owner_email = "other@test.com"
+        mock_db.query.return_value.filter.return_value.first.return_value = agent
+        assert await service._check_agent_access_by_id(mock_db, "agent-1", None, None) is True
 
 
 class TestVisibleAgentIds:
@@ -4645,10 +4771,19 @@ class TestVisibleAgentIds:
     def mock_db(self):
         return MagicMock(spec=Session)
 
-    def test_admin_bypass_returns_none(self, service, mock_db):
-        """Admin context (user_email=None, token_teams=None) returns None for unrestricted access."""
+    def test_admin_bypass_returns_filtered_list(self, service, mock_db):
+        """Admin context (user_email=None, token_teams=None) returns public+team agents only (PR #4341)."""
+        # Mock the query to return public and team agents (excluding private)
+        mock_query = MagicMock()
+        mock_db.query.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.all.return_value = [("id-pub",), ("id-team",)]
+
         result = service._visible_agent_ids(mock_db, user_email=None, token_teams=None)
-        assert result is None
+        # Post-#4341: admin bypass returns a filtered list (not None)
+        assert result is not None
+        assert isinstance(result, list)
+        assert result == ["id-pub", "id-team"]
 
     def test_public_only_user_filters_to_public(self, service, mock_db):
         """Empty token_teams means public-only — query runs with public visibility filter."""
@@ -4683,7 +4818,7 @@ class TestVisibleAgentIds:
         # Not admin (token_teams is not None), no user_email → is_public_only is True
         assert result == []
 
-    def test_admin_with_email_returns_none(self, service, mock_db):
+    def test_admin_with_email_returns_filtered_list(self, service, mock_db):
         """Admin with email context (token_teams=None, user_email set) still gets admin bypass only when both are None."""
         mock_query = MagicMock()
         mock_db.query.return_value = mock_query
@@ -4693,6 +4828,43 @@ class TestVisibleAgentIds:
         result = service._visible_agent_ids(mock_db, user_email="admin@test.com", token_teams=None)
         # token_teams=None but user_email set → NOT admin bypass, runs query
         assert result == ["id-all"]
+
+    def test_db_admin_with_email_runs_filtered_query(self, service, mock_db):
+        """PR #4341 regression: DB-admin (email, None) shape runs the filtered query.
+
+        Previously _visible_agent_ids used ``is_admin_bypass_granted`` which matched
+        the (email, None) DB-admin shape. That bypassed the per-agent visibility
+        filter and let DB admins enumerate other users' private agents via
+        list_tasks / list_push_configs_for_dispatch.
+
+        The hardened assertion below compiles the second ``filter()`` argument and
+        confirms the SQL still scopes to public + team + own-private, and crucially
+        that ``owner_email`` is bound only to the caller (not bypassed or omitted).
+        Without this, a regression that re-introduced the unscoped path could pass
+        a test that only asserted ``result is not None``.
+        """
+        mock_db.info = {}
+        install_admin_user(mock_db, email="admin@test.com")
+        mock_query = MagicMock()
+        mock_db.query.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.all.return_value = [("agent-public",), ("agent-own-private",)]
+
+        result = service._visible_agent_ids(mock_db, user_email="admin@test.com", token_teams=None)
+
+        assert result == ["agent-public", "agent-own-private"]
+
+        # Production code calls .filter(enabled).filter(or_(visibility_filters)).
+        # Capture the visibility predicate (second filter call) and verify shape.
+        filter_calls = mock_query.filter.call_args_list
+        assert len(filter_calls) >= 2, "expected enabled + visibility filters"
+        visibility_clause = filter_calls[1].args[0]
+        compiled = str(visibility_clause.compile(compile_kwargs={"literal_binds": True}))
+
+        assert "visibility = 'public'" in compiled or "'public'" in compiled
+        assert "visibility = 'private'" in compiled or "'private'" in compiled
+        assert "owner_email" in compiled
+        assert "admin@test.com" in compiled, f"private branch must scope owner to caller, got: {compiled}"
 
 
 class TestGetTask:
@@ -4724,16 +4896,18 @@ class TestGetTask:
 
         mock_db.query.side_effect = [mock_query, mock_agent_query]
 
-    def test_task_not_found_returns_none(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_task_not_found_returns_none(self, service, mock_db):
         mock_query = MagicMock()
         mock_query.filter.return_value = mock_query
         mock_query.limit.return_value = mock_query
         mock_query.all.return_value = []
         mock_db.query.return_value = mock_query
 
-        assert service.get_task(mock_db, "missing") is None
+        assert await service.get_task(mock_db, "missing") is None
 
-    def test_ambiguous_task_without_agent_id_returns_none(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_ambiguous_task_without_agent_id_returns_none(self, service, mock_db):
         """Two matches without agent_id must refuse to guess."""
         task_a = MagicMock()
         task_a.a2a_agent_id = "agent-a"
@@ -4746,7 +4920,7 @@ class TestGetTask:
         mock_query.all.return_value = [task_a, task_b]
         mock_db.query.return_value = mock_query
 
-        assert service.get_task(mock_db, "shared-task-id", user_email=None, token_teams=None) is None
+        assert await service.get_task(mock_db, "shared-task-id", user_email=None, token_teams=None) is None
 
     def _wire_task(self, **overrides):
         """Return a MagicMock with the attributes _task_to_wire needs."""
@@ -4760,19 +4934,35 @@ class TestGetTask:
         t.payload = overrides.get("payload", None)
         return t
 
-    def test_task_visible_to_admin(self, service, mock_db):
-        """Admin bypass (user_email=None, token_teams=None) sees any task."""
+    @pytest.mark.asyncio
+    async def test_task_hidden_from_admin_for_private(self, service, mock_db):
+        """SECURITY: admin bypass cannot see tasks on private agents (Layer 1 visibility)."""
         task = self._wire_task()
         agent = MagicMock()
         agent.visibility = "private"
         agent.owner_email = "other@test.com"
         self._setup_task_query(mock_db, task, agent)
 
-        result = service.get_task(mock_db, "t1", user_email=None, token_teams=None)
+        result = await service.get_task(mock_db, "t1", user_email=None, token_teams=None)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_task_visible_to_admin_for_team(self, service, mock_db):
+        """Admin bypass sees tasks on team agents (only private is denied)."""
+        task = self._wire_task()
+        agent = MagicMock()
+        agent.visibility = "team"
+        agent.team_id = "team-a"
+        agent.owner_email = "other@test.com"
+        self._setup_task_query(mock_db, task, agent)
+
+        result = await service.get_task(mock_db, "t1", user_email=None, token_teams=None)
 
         assert result["id"] == "t1"
 
-    def test_task_hidden_from_wrong_team(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_task_hidden_from_wrong_team(self, service, mock_db):
         """Team-scoped user cannot see tasks owned by agents in a different team."""
         task = MagicMock()
         task.a2a_agent_id = "agent-1"
@@ -4782,11 +4972,12 @@ class TestGetTask:
         agent.owner_email = "other@test.com"
         self._setup_task_query(mock_db, task, agent)
 
-        result = service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=["team-a"])
+        result = await service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=["team-a"])
 
         assert result is None
 
-    def test_task_visible_to_correct_team(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_task_visible_to_correct_team(self, service, mock_db):
         """Team-scoped user can see tasks owned by agents in their team."""
         task = self._wire_task()
         agent = MagicMock()
@@ -4795,28 +4986,31 @@ class TestGetTask:
         agent.owner_email = "other@test.com"
         self._setup_task_query(mock_db, task, agent)
 
-        result = service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=["team-a"])
+        result = await service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=["team-a"])
         assert result["id"] == "t1"
 
-    def test_task_visible_when_agent_deleted(self, service, mock_db):
-        """If the owning agent was deleted, the task is still returned (agent=None passes the check)."""
+    @pytest.mark.asyncio
+    async def test_task_hidden_when_agent_deleted(self, service, mock_db):
+        """If the owning agent was deleted, the task is hidden (fail-closed per PR #4341)."""
         task = self._wire_task(a2a_agent_id="deleted-agent")
         self._setup_task_query(mock_db, task, agent=None)
 
-        result = service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=["team-a"])
-        assert result["id"] == "t1"
+        result = await service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=["team-a"])
+        assert result is None
 
-    def test_public_only_user_sees_public_agent_task(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_public_only_user_sees_public_agent_task(self, service, mock_db):
         """Public-only user (empty teams) can see tasks for public agents."""
         task = self._wire_task()
         agent = MagicMock()
         agent.visibility = "public"
         self._setup_task_query(mock_db, task, agent)
 
-        result = service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=[])
+        result = await service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=[])
         assert result["id"] == "t1"
 
-    def test_public_only_user_cannot_see_private_agent_task(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_public_only_user_cannot_see_private_agent_task(self, service, mock_db):
         """Public-only user (empty teams) cannot see tasks for private agents."""
         task = MagicMock()
         task.a2a_agent_id = "agent-1"
@@ -4825,7 +5019,7 @@ class TestGetTask:
         agent.owner_email = "user@test.com"
         self._setup_task_query(mock_db, task, agent)
 
-        result = service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=[])
+        result = await service.get_task(mock_db, "t1", user_email="user@test.com", token_teams=[])
 
         assert result is None
 
@@ -4841,8 +5035,8 @@ class TestListTasks:
     def mock_db(self):
         return MagicMock(spec=Session)
 
-    def test_admin_sees_all_tasks(self, service, mock_db):
-        """Admin bypass does not filter by agent IDs."""
+    def test_admin_bypass_applies_visibility_filter(self, service, mock_db):
+        """Admin bypass now applies the visible-agent filter to task listing."""
         mock_query = MagicMock()
         mock_db.query.return_value = mock_query
         mock_query.filter.return_value = mock_query
@@ -4851,14 +5045,12 @@ class TestListTasks:
         mock_query.offset.return_value = mock_query
         mock_query.all.return_value = []
 
-        with patch.object(service, "_visible_agent_ids", return_value=None):
+        with patch.object(service, "_visible_agent_ids", return_value=["agent-1"]):
             result = service.list_tasks(mock_db, user_email=None, token_teams=None)
 
         assert result == []
-        # Verify .in_() was NOT called (no agent ID filter applied)
-        for call in mock_query.filter.call_args_list:
-            for arg in call.args:
-                assert "in_" not in str(arg), "Admin should not have .in_() filter"
+        # Verify .in_() was called (agent ID filter applied)
+        assert any("IN" in str(arg) for call in mock_query.filter.call_args_list for arg in call.args), "Admin should have .in_() filter"
 
     def test_team_scoped_user_gets_filtered_tasks(self, service, mock_db):
         """Team user only sees tasks for visible agents."""
@@ -4892,7 +5084,7 @@ class TestListTasks:
         mock_query.offset.return_value = mock_query
         mock_query.all.return_value = []
 
-        with patch.object(service, "_visible_agent_ids", return_value=None):
+        with patch.object(service, "_visible_agent_ids", return_value=["agent-1"]):
             service.list_tasks(mock_db, state="completed", user_email=None, token_teams=None)
 
         # filter called at least once for state
@@ -5032,9 +5224,59 @@ class TestUAIDGenerationCoverage:
         assert captured_agent is not None
         assert captured_agent.id is None  # Falls back to UUID generation
 
+    async def test_update_agent_with_uaid_validation(self, service, mock_db, sample_db_agent, monkeypatch, caplog):
+        """Test update_agent validates endpoint domain when regenerating UAID.
+
+        Security: Domain validation failures must propagate (not be silently swallowed)
+        to prevent registration of agents pointing to unauthorized domains.
+        """
+        # Standard
+        from unittest.mock import patch
+
+        # Set version attribute
+        sample_db_agent.version = 1
+
+        # Configure UAID allowlist
+        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", ["allowed.example.com"])
+        monkeypatch.setattr("mcpgateway.config.settings.uaid_allow_all_domains", False)
+
+        # Mock get_for_update to return the agent
+        with patch("mcpgateway.services.a2a_service.get_for_update", return_value=sample_db_agent):
+            mock_db.commit = MagicMock()
+            mock_db.refresh = MagicMock()
+
+            # Mock the convert_agent_to_read method
+            with patch.object(service, "convert_agent_to_read", return_value=MagicMock()):
+                # Try to update agent with UAID generation for a blocked domain
+                agent_update = A2AAgentUpdate(
+                    endpoint_url="https://blocked.example.com/agent",
+                    generate_uaid=True,
+                    uaid_registry="context-forge",
+                )
+
+                # Security: validation failure must raise, not silently continue
+                with pytest.raises(A2AAgentError, match="not in UAID_ALLOWED_DOMAINS"):
+                    await service.update_agent(
+                        mock_db,
+                        agent_id=sample_db_agent.id,
+                        agent_data=agent_update,
+                        modified_by="test-user",
+                    )
+
 
 class TestCrossGatewayRoutingCoverage:
     """Test cross-gateway routing for UAID agents."""
+
+    @pytest.fixture(autouse=True)
+    def override_uaid_settings_for_allowlist_tests(self, monkeypatch):
+        """Override the global mock_uaid_settings to test allowlist validation.
+
+        These tests specifically test allowlist behavior, so they need
+        uaid_allow_all_domains=False (not the bypass=True from the global fixture).
+        """
+        # Don't bypass validation for these tests
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allow_all_domains", False)
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_max_federation_hops", 5)
 
     @pytest.fixture
     def service(self):
@@ -5067,7 +5309,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         # Call invoke_agent with UAID (will trigger cross-gateway routing)
         result = await service.invoke_agent(
@@ -5078,16 +5320,20 @@ class TestCrossGatewayRoutingCoverage:
             agent_id=uaid,
         )
 
-        # Verify cross-gateway routing was called. The UAID is URL-
-        # encoded in the path as a defence-in-depth measure against
-        # path-segment smuggling.
-        # Standard
-        from urllib.parse import quote  # pylint: disable=import-outside-toplevel
-
+        # Verify cross-gateway routing was called. The UAID is passed in
+        # the request body instead of the URL path to support UAIDs containing
+        # forward slashes (which break FastAPI path parameter matching).
         assert result == {"result": "cross-gateway success"}
         assert mock_client.post.called
         call_args = mock_client.post.call_args
-        assert f"https://agent.example.com/a2a/{quote(uaid, safe='')}/invoke" in str(call_args)
+
+        # Check URL is the body-based invoke endpoint (not path-based)
+        assert "https://agent.example.com/a2a/invoke" in str(call_args)
+
+        # Check UAID is in request body as agent_id
+        sent_json = call_args.kwargs.get("json") or (call_args.args[1] if len(call_args.args) > 1 else {})
+        assert sent_json.get("agent_id") == uaid, f"UAID not in body: {sent_json}"
+
         # Hop counter must be stamped on outbound requests so the
         # receiving gateway can enforce `uaid_max_federation_hops`
         # and break recursion.  First outbound from a direct client
@@ -5159,6 +5405,9 @@ class TestCrossGatewayRoutingCoverage:
         agent.owner_email = None
         agent.team_id = None
         agent.tags = []
+        # UAID fields - set to None to skip UAID validation
+        agent.uaid = None
+        agent.uaid_native_id = None
 
         mock_db = MagicMock(spec=Session)
         result = MagicMock()
@@ -5217,6 +5466,9 @@ class TestCrossGatewayRoutingCoverage:
         agent.owner_email = None
         agent.team_id = None
         agent.tags = []
+        # UAID fields - set to None to skip UAID validation
+        agent.uaid = None
+        agent.uaid_native_id = None
 
         mock_db = MagicMock(spec=Session)
         result = MagicMock()
@@ -5261,7 +5513,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         max_hops = settings.uaid_max_federation_hops
 
@@ -5312,7 +5564,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5337,7 +5589,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5365,7 +5617,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         with pytest.raises(A2AAgentError, match="Cross-gateway routing failed.*HTTP 500"):
             await service._invoke_remote_agent(
@@ -5378,7 +5630,7 @@ class TestCrossGatewayRoutingCoverage:
         """Test _invoke_remote_agent domain allowlist enforcement."""
         uaid = "uaid:aid:9BjK3mP7xQv;uid=0;registry=context-forge;proto=a2a;nativeId=blocked.example.com"
 
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", ["allowed.com"])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["allowed.com"])
 
         with pytest.raises(A2AAgentError, match="not allowed.*UAID_ALLOWED_DOMAINS"):
             await service._invoke_remote_agent(
@@ -5414,7 +5666,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         with pytest.raises(A2AAgentError, match="Cross-gateway routing failed.*Network error"):
             await service._invoke_remote_agent(
@@ -5469,7 +5721,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         # Capture structured_logger.log calls so we can assert the
         # decode path fires the distinct `CrossGatewayDecodeError` event
@@ -5538,7 +5790,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5571,7 +5823,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5589,7 +5841,7 @@ class TestCrossGatewayRoutingCoverage:
         # Attack: Try to bypass allowlist by using domain that ends with allowed domain
         uaid = "uaid:aid:9BjK3mP7xQv;uid=0;registry=context-forge;proto=a2a;nativeId=evilallowed.com"
 
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", ["allowed.com"])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["allowed.com"])
 
         with pytest.raises(A2AAgentError, match="not allowed.*not in UAID_ALLOWED_DOMAINS"):
             await service._invoke_remote_agent(
@@ -5612,7 +5864,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", ["example.com"])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5636,7 +5888,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", ["example.com"])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5698,34 +5950,20 @@ class TestCrossGatewayRoutingCoverage:
             )
 
     async def test_invoke_remote_agent_ssrf_internal_ip_empty_allowlist(self, service, monkeypatch):
-        """Test internal IP routing when allowlist is empty (unsafe default)."""
-        # When UAID_ALLOWED_DOMAINS is empty, internal IPs are technically allowed
-        # This documents the unsafe default behavior - operators must configure allowlist
+        """Test internal IP routing is blocked when allowlist is empty (fail-closed)."""
+        # When UAID_ALLOWED_DOMAINS is empty, all cross-gateway routing is blocked
+        # This is fail-closed behavior - operators must explicitly configure allowlist
         uaid = "uaid:aid:9BjK3mP7xQv;uid=0;registry=context-forge;proto=a2a;nativeId=127.0.0.1"
 
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"result": "allowed"}
-        mock_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", [])  # Empty allowlist
 
-        async def mock_get_http_client():
-            return mock_client
-
-        monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])  # Empty allowlist
-
-        # With empty allowlist, the call succeeds (unsafe behavior)
-        result = await service._invoke_remote_agent(
-            uaid=uaid,
-            parameters={"test": "data"},
-            interaction_type="request",
-        )
-
-        assert result == {"result": "allowed"}
-        # Verify the internal IP was used in the URL
-        call_args = mock_client.post.call_args
-        assert "127.0.0.1" in call_args[0][0]
+        # With empty allowlist, the call is blocked (fail-closed behavior)
+        with pytest.raises(A2AAgentError, match="UAID_ALLOWED_DOMAINS is empty"):
+            await service._invoke_remote_agent(
+                uaid=uaid,
+                parameters={"test": "data"},
+                interaction_type="request",
+            )
 
     async def test_invoke_remote_agent_ssrf_internal_ip_blocked_by_allowlist(self, service):
         """Test internal IP routing is blocked when allowlist is configured (safe behavior)."""
@@ -5766,7 +6004,7 @@ class TestCrossGatewayRoutingCoverage:
             return mock_client
 
         monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-        monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", ["example.com"])
+        monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
         result = await service._invoke_remote_agent(
             uaid=uaid,
@@ -5817,7 +6055,7 @@ async def test_invoke_agent_cross_gateway_routing_http_error(module_service, mod
     monkeypatch.setattr("mcpgateway.utils.uaid.extract_routing_info", mock_extract_routing)
 
     # Allow all domains (empty list means no restrictions)
-    monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
     # Mock HTTP client to return 500 error.  The service now reads
     # `.text` for the (redacted, operator-only) error log body, so the
@@ -5852,6 +6090,8 @@ async def test_invoke_agent_uaid_disallowed_domain(module_service, module_mock_d
     from mcpgateway.config import settings
     from mcpgateway.services.a2a_service import A2AAgentError
 
+    # Override the global mock to test allowlist validation
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allow_all_domains", False)
     monkeypatch.setattr(settings, "uaid_allowed_domains", ["trusted.com"])
 
     def mock_extract_routing(*args, **kwargs):
@@ -5941,7 +6181,7 @@ async def test_invoke_remote_agent_unsupported_protocol(module_service, monkeypa
     uaid = "uaid:aid:9BjK3mP7xQv;uid=0;registry=context-forge;proto=grpc;nativeId=grpc.example.com"
 
     # Mock settings
-    monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
 
     # Should raise A2AAgentError (ValueError is caught and re-raised)
     with pytest.raises(A2AAgentError, match="Invalid UAID or endpoint not allowed"):
@@ -5968,7 +6208,7 @@ async def test_invoke_remote_agent_no_correlation_id(module_service, monkeypatch
         return mock_client
 
     monkeypatch.setattr("mcpgateway.services.http_client_service.get_http_client", mock_get_http_client)
-    monkeypatch.setattr("mcpgateway.config.settings.uaid_allowed_domains", [])
+    monkeypatch.setattr("mcpgateway.services.a2a_service.settings.uaid_allowed_domains", ["example.com"])
     # Mock get_correlation_id to return None
     monkeypatch.setattr("mcpgateway.services.a2a_service.get_correlation_id", lambda: None)
 

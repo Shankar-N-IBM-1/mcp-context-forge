@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Location: ./mcpgateway/alembic/versions/add_toolops_test_case_table.py
-Copyright 2025
+"""Location: ./mcpgateway/alembic/versions/add_toolops_test_cases_table.py
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Jay Bandlamudi
 
-add_a2a_agents_and_metrics
+add_toolops_test_cases_table
 
-Revision ID: add_a2a_agents_and_metrics
+Revision ID: add_toolops_test_cases_table
 Revises: add_oauth_tokens_table
 Create Date: 2025-11-27 10:00:00.000000
 """
