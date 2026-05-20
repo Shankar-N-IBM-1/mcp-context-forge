@@ -109,7 +109,7 @@ class FAMAssetCatalogClient:
                 return await result
             return result
 
-    async def _execute_with_error_handling(self, func: Callable[..., Any], operation_name: str, default_return: Any = None, *args: Any, **kwargs: Any) -> Any:
+    async def _execute_with_error_handling(self, func: Callable[..., Any], operation_name: str, *args: Any, default_return: Any = None, **kwargs: Any) -> Any:
         """Execute function with standardized error handling and circuit breaker protection.
 
         This method provides a centralized error handling pattern for all IBM API Connect Federated API Management API calls:

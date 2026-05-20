@@ -165,7 +165,7 @@ class SyncServersActivity(AbstractScheduledActivity):
                         continue
 
                     # Try to create server in FAM
-                    self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers")
+                    self.logger.debug("Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers")
                     self.logger.debug(f"Server ID: {server.id}, Name: {server.name}")
 
                     success = await self._fam_client.create_server(server)

@@ -147,7 +147,7 @@ class APIConnectFAMPlugin(Plugin):
             logger.info(f"Runtime ID: {self._runtime_id}")
             logger.info(f"Asset Sync: {'Enabled' if self._cfg.fam_asset_sync_enabled else 'Disabled'}")
             logger.info(f"Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
-            logger.info(f"Circuit Breaker: Enabled (default)")
+            logger.info("Circuit Breaker: Enabled (default)")
 
             # Initialize activity orchestrator
             self._orchestrator = ActivityOrchestrator(

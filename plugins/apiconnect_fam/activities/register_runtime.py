@@ -94,7 +94,7 @@ class RegisterRuntimeActivity(AbstractActivity):
         Raises:
             Exception: If registration fails
         """
-        self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v2/runtimes")
+        self.logger.debug("Calling FAM API: POST /api/assetcatalog/v2/runtimes")
         self.logger.debug(f"Runtime Name: {self._runtime_config.get('name', 'ContextForge Gateway')}")
         self.logger.debug(f"Runtime Type: {self._runtime_config.get('type', 'MCP_CONTEXT_FORGE')}")
 

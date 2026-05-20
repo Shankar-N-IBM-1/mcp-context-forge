@@ -75,7 +75,7 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
         Raises:
             Exception: If heartbeat fails
         """
-        self.logger.debug(f"Calling FAM API: POST /api/engine/v2/runtimes/heartbeat")
+        self.logger.debug("Calling FAM API: POST /api/engine/v2/runtimes/heartbeat")
         self.logger.debug(f"Runtime ID: {self.context.runtime_id}")
 
         success = await self._fam_client.send_heartbeat(self.context.runtime_id)

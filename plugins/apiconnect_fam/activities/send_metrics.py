@@ -107,7 +107,7 @@ class SendMetricsActivity(AbstractScheduledActivity):
                 self.logger.debug("Sending empty metrics payload (no metrics in time window)")
 
             # Build payload using FAMMetricsPayload builder
-            self.logger.debug(f"Calling FAM API: POST /api/engine/v3/runtimes/.../metrics")
+            self.logger.debug("Calling FAM API: POST /api/engine/v3/runtimes/.../metrics")
             payload = FAMMetricsPayload.build_payload(
                 timestamp=datetime.now(timezone.utc), server_metrics_map=dict(server_metrics_map), tool_metrics_by_server={k: dict(v) for k, v in tool_metrics_by_server.items()}
             )
