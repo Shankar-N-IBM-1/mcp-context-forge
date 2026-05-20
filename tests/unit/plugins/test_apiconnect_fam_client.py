@@ -103,7 +103,7 @@ class TestFAMClientRuntimeRegistration:
         report = await client.register_runtime(
             name="Test Runtime",
             description="Test Description",
-            runtime_type="WEBMETHODS_GATEWAY",
+            runtime_type="MCP_CONTEXT_FORGE",
         )
         
         assert report is not None
@@ -129,7 +129,7 @@ class TestFAMClientRuntimeRegistration:
         report = await client.register_runtime(
             name="Test Runtime",
             description="Test Description",
-            runtime_type="WEBMETHODS_GATEWAY",
+            runtime_type="MCP_CONTEXT_FORGE",
         )
         
         assert report is not None
@@ -154,7 +154,7 @@ class TestFAMClientRuntimeRegistration:
         report = await client.register_runtime(
             name="Test Runtime",
             description="Test Description",
-            runtime_type="WEBMETHODS_GATEWAY",
+            runtime_type="MCP_CONTEXT_FORGE",
         )
         
         assert report is not None
@@ -169,7 +169,7 @@ class TestFAMClientRuntimeRegistration:
         report = await client.register_runtime(
             name="Test Runtime",
             description="Test Description",
-            runtime_type="WEBMETHODS_GATEWAY",
+            runtime_type="MCP_CONTEXT_FORGE",
         )
         
         assert report is None

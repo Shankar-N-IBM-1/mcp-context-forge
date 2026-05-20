@@ -26,7 +26,7 @@ class TestRegisterRuntimeActivity:
             config={
                 "fam_runtime_name": "Test Runtime",
                 "fam_runtime_description": "Test Description",
-                "fam_runtime_type": "WEBMETHODS_GATEWAY",
+                "fam_runtime_type": "MCP_CONTEXT_FORGE",
                 "fam_runtime_deployment_type": "ON_PREMISE",
                 "fam_runtime_region": "us-east-1",
                 "fam_runtime_location": "US East",
@@ -48,7 +48,7 @@ class TestRegisterRuntimeActivity:
         return {
             "name": "Test Runtime",
             "description": "Test Description",
-            "type": "WEBMETHODS_GATEWAY",
+            "type": "MCP_CONTEXT_FORGE",
             "deployment_type": "ON_PREMISE",
             "region": "us-east-1",
             "location": "US East",
