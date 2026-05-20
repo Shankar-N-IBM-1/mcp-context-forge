@@ -16,15 +16,14 @@ plugin_settings:
   include_user_info: false
 
 plugins:
-<<<<<<< HEAD
-  # API Connect FAM - integrates with webMethods API Control Plane FAM
+  # API Connect FAM - integrates with IBM API Connect Federated API Management
   - name: "APIConnectFAM"
     kind: "plugins.apiconnect_fam.apiconnect_fam.APIConnectFAMPlugin"
-    description: "Integrates with webMethods API Control Plane FAM - syncs servers, tools, and metrics"
+    description: "Integrates with IBM API Connect Federated API Management - syncs servers, tools, and metrics"
     version: "1.0.0"
-    author: "ContextForge"
+    author: "Shankar N"
     hooks: []  # No hooks, uses background task
-    tags: ["fam", "api-connect", "webmethods", "sync", "monitoring"]
+    tags: ["fam", "sync", "monitoring"]
     mode: "permissive"
     priority: 1000
     conditions: []
@@ -34,17 +33,17 @@ plugins:
       
       # FAM sync configuration (disabled by default)
       fam_enabled: true
-      fam_base_url: "http://localhost:3000"
+      fam_base_url: "http://sample.com"
       fam_runtime_id: "0f8320a0-6a63-45b5-8217-a7488f150980"  # REQUIRED: Runtime ID from FAM registration
-      fam_username: "Administrator"  # FAM username for Basic Authentication
-      fam_password: "Welcome@123"    # FAM password for Basic Authentication
+      fam_username: "your-username"  # FAM username for Basic Authentication
+      fam_password: "your-password"    # FAM password for Basic Authentication
       fam_timeout: 30
       fam_verify_ssl: false  # Set to false for self-signed certificates
       
       # Runtime metadata (for reference only, not used after initial registration)
       fam_runtime_name: "ContextForge Gateway"
       fam_runtime_description: "ContextForge MCP Gateway Runtime"
-      fam_runtime_type: "WEBMETHODS_GATEWAY"  # WEBMETHODS_GATEWAY, APIGEE, KONG, AWS_API_GATEWAY, AZURE_API_MANAGEMENT
+      fam_runtime_type: "MCP_CONTEXT_FORGE"  # WEBMETHODS_GATEWAY, APIGEE, KONG, AWS_API_GATEWAY, AZURE_API_MANAGEMENT
       fam_runtime_deployment_type: "ON_PREMISE"  # ON_PREMISE, CLOUD, HYBRID
       fam_runtime_region: "us-east-1"  # Optional: Region identifier
       fam_runtime_location: "US East"  # Optional: Location description
@@ -61,7 +60,7 @@ plugins:
       # Metrics sync configuration (disabled by default)
       metrics_sync_enabled: true  # Enable metrics synchronization to FAM
       metrics_sync_interval: 300   # Sync metrics every 5 minutes (300 seconds)
-=======
+
   # Span Attribute Customizer - customize OpenTelemetry span attributes
   - name: "SpanAttributeCustomizer"
     kind: "plugins.span_attribute_customizer.span_attribute_customizer.SpanAttributeCustomizerPlugin"
@@ -90,7 +89,6 @@ plugins:
         - "tenant.id"
         - "user.id"
       emit_baggage_prefixed_attributes: false
->>>>>>> main
 
   # Argument Normalizer - stabilize inputs before anything else
   - name: "ArgumentNormalizer"
