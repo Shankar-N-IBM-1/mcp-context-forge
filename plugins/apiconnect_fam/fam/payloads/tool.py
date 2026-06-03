@@ -43,6 +43,7 @@ class FAMToolPayload:
         - Whitespace
 
         Note: Colon (:) is NOT in the allowed character set per FAM API spec.
+        Backticks are converted to single quotes for better readability.
 
         Args:
             value: String value to sanitize
@@ -55,6 +56,9 @@ class FAMToolPayload:
 
         # Convert to string
         str_value = str(value)
+        
+        # Replace backticks with single quotes for better readability
+        str_value = str_value.replace("`", "'")
 
         # Allowed punctuation characters (matching FAM API safeString pattern exactly)
         # Note: colon (:) is explicitly NOT included
@@ -158,7 +162,11 @@ class FAMToolPayload:
         # Copy only allowed attributes from source schema
         for key in ALLOWED_SCHEMA_ATTRS:
             if key in schema_dict:
-                schema[key] = schema_dict[key]
+                # Sanitize and truncate description fields (max 300 chars per FAM API)
+                if key == "description":
+                    schema[key] = FAMToolPayload._truncate_string(schema_dict[key], 300)
+                else:
+                    schema[key] = schema_dict[key]
 
         # Ensure required 'type' field exists
         if "type" not in schema:
@@ -257,8 +265,8 @@ class FAMToolPayload:
         if hasattr(tool, "id") and tool.id:
             payload["mcpToolId"] = cls._truncate_string(str(tool.id), 255)
 
-        # Optional description
-        description = cls._truncate_string(tool.description or tool.original_description, 1000)
+        # Optional description (max 300 chars per FAM API validation)
+        description = cls._truncate_string(tool.description or tool.original_description, 300)
         if description:
             payload["description"] = description
 
