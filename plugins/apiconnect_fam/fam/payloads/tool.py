@@ -123,7 +123,7 @@ class FAMToolPayload:
         - description: string (optional)
         - format: string (optional)
 
-        Filters out ContextForge-specific extension fields (x-* prefixed).
+        Filters out any attributes not in the MCPToolSchema specification.
         Handles anyOf schemas by extracting type from first option.
 
         Each property in 'properties' can be:
@@ -139,30 +139,26 @@ class FAMToolPayload:
         if not schema_dict or not isinstance(schema_dict, dict):
             return None
 
-        # Create a copy to avoid modifying the original
-        schema = dict(schema_dict)
+        # Define allowed MCPToolSchema attributes per FAM API spec
+        ALLOWED_SCHEMA_ATTRS = {"type", "properties", "required", "description", "format"}
 
-        # Remove ContextForge-specific extension fields (x-* prefixed)
-        # These are not part of the FAM API schema specification
-        keys_to_remove = [key for key in schema.keys() if key.startswith("x-")]
-        for key in keys_to_remove:
-            del schema[key]
-
-        # Handle anyOf schemas - extract type from first option
+        # Create a new schema with only allowed attributes
+        schema = {}
+        
+        # Handle anyOf schemas first - extract type from first option
         # FAM API doesn't support anyOf, so we use the first type as the canonical type
-        if "anyOf" in schema and isinstance(schema["anyOf"], list) and len(schema["anyOf"]) > 0:
-            first_option = schema["anyOf"][0]
-            if isinstance(first_option, dict) and "type" in first_option:
-                schema["type"] = first_option["type"]
-                # Copy other relevant fields from first option
-                if "items" in first_option:
-                    schema["items"] = first_option["items"]
-                if "properties" in first_option:
-                    schema["properties"] = first_option["properties"]
-                if "required" in first_option:
-                    schema["required"] = first_option["required"]
-            # Remove anyOf after extracting type
-            del schema["anyOf"]
+        if "anyOf" in schema_dict and isinstance(schema_dict["anyOf"], list) and len(schema_dict["anyOf"]) > 0:
+            first_option = schema_dict["anyOf"][0]
+            if isinstance(first_option, dict):
+                # Merge first option into schema_dict for processing
+                for key in ALLOWED_SCHEMA_ATTRS:
+                    if key in first_option:
+                        schema_dict[key] = first_option[key]
+
+        # Copy only allowed attributes from source schema
+        for key in ALLOWED_SCHEMA_ATTRS:
+            if key in schema_dict:
+                schema[key] = schema_dict[key]
 
         # Ensure required 'type' field exists
         if "type" not in schema:
@@ -177,7 +173,7 @@ class FAMToolPayload:
             normalized_properties = {}
             for prop_name, prop_value in schema["properties"].items():
                 if isinstance(prop_value, dict):
-                    # Recursively normalize all property schemas (handles anyOf, x-*, etc.)
+                    # Recursively normalize all property schemas (filters non-allowed attrs)
                     prop_value = FAMToolPayload._build_schema(prop_value) or prop_value
 
                     # Ensure each property has a 'type' field after normalization
@@ -190,6 +186,10 @@ class FAMToolPayload:
                     normalized_properties[prop_name] = {"type": "string"}
 
             schema["properties"] = normalized_properties
+
+        # Recursively process items for array types
+        if "items" in schema and isinstance(schema["items"], dict):
+            schema["items"] = FAMToolPayload._build_schema(schema["items"]) or schema["items"]
 
         # Ensure 'required' is a list if present
         if "required" in schema and not isinstance(schema["required"], list):
