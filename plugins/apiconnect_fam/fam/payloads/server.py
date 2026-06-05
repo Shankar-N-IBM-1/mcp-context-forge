@@ -91,11 +91,12 @@ class FAMServerPayload:
             server: ContextForge Server ORM object
 
         Returns:
-            List of tag strings (max 50 items)
+            List of tag strings (max 50 items), with null values filtered out
         """
         tags = []
         if hasattr(server, "tags") and isinstance(server.tags, list):
-            tags = server.tags[:50]  # Enforce maxItems: 50
+            # Filter out None/null values and convert to strings
+            tags = [str(tag) for tag in server.tags if tag is not None][:50]  # Enforce maxItems: 50
         return tags
 
     @classmethod
