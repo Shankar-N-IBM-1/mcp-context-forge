@@ -86,16 +86,31 @@ class FAMServerPayload:
     @staticmethod
     def _get_tags(server: Any) -> List[str]:
         """Extract and validate tags from server.
+        
+        FAM API requirements:
+        1. No whitespaces allowed in tags
+        2. Maximum 50 characters per tag
+        3. Maximum 50 tags total
 
         Args:
             server: ContextForge Server ORM object
 
         Returns:
-            List of tag strings (max 50 items)
+            List of tag strings (max 50 items, each max 50 chars, no whitespace)
         """
         tags = []
         if hasattr(server, "tags") and isinstance(server.tags, list):
-            tags = server.tags[:50]  # Enforce maxItems: 50
+            for tag in server.tags:
+                if tag is not None:
+                    # Convert to string and replace whitespace with hyphens
+                    tag_str = str(tag).replace(" ", "-").replace("\t", "-").replace("\n", "-")
+                    # Truncate to 50 characters
+                    tag_str = tag_str[:50]
+                    # Only add non-empty tags
+                    if tag_str:
+                        tags.append(tag_str)
+            # Enforce maxItems: 50
+            tags = tags[:50]
         return tags
 
     @classmethod

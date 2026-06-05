@@ -294,7 +294,8 @@ class FAMToolPayload:
     def build_update_payload(cls, tool: Any) -> Dict[str, Any]:
         """Build MCPToolUpdate payload for PUT request.
 
-        All fields are optional in update schema.
+        mcpToolId is mandatory for bulk update operations.
+        All other fields are optional in update schema.
 
         Args:
             tool: ContextForge Tool ORM object
@@ -303,6 +304,12 @@ class FAMToolPayload:
             Dictionary matching MCPToolUpdate schema
         """
         payload: Dict[str, Any] = {}
+        
+        # Mandatory mcpToolId for bulk update
+        if hasattr(tool, "id") and tool.id:
+            payload["mcpToolId"] = cls._truncate_string(str(tool.id), 255)
+
+        
 
         # Optional name
         name = cls._truncate_string(tool.original_name or tool.custom_name, 255)
@@ -310,7 +317,7 @@ class FAMToolPayload:
             payload["name"] = name
 
         # Optional description
-        description = cls._truncate_string(tool.description or tool.original_description, 1000)
+        description = cls._truncate_string(tool.description or tool.original_description, 300)
         if description:
             payload["description"] = description
 
