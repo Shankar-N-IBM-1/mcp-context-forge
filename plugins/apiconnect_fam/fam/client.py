@@ -8,7 +8,10 @@ IBM API Connect Federated API Management Asset Catalog Client.
 
 # Standard
 import base64
+import json
 import logging
+import ssl
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 # Third-Party
@@ -16,7 +19,7 @@ import httpx
 
 # Local
 from ..circuit_breaker import CircuitBreaker, CircuitBreakerError
-from ..models import ReregistrationReport
+from ..models import ReregistrationReport, TLSConfig
 from .endpoints import FAMEndpoints
 from .payloads import FAMRuntimePayload, FAMServerPayload, FAMToolPayload
 
@@ -46,6 +49,7 @@ class FAMAssetCatalogClient:
         client_id: Optional[str] = None,
         timeout: int = 30,
         verify_ssl: bool = True,
+        tls_config: Optional[TLSConfig] = None,
         circuit_breaker_enabled: bool = True,
         circuit_breaker_failure_threshold: int = 5,
         circuit_breaker_recovery_timeout: float = 60.0,
@@ -62,6 +66,7 @@ class FAMAssetCatalogClient:
             client_id: IBM API Connect Federated API Management client ID for API Key Authentication
             timeout: HTTP request timeout in seconds
             verify_ssl: Whether to verify SSL certificates (default: True, set False for self-signed certs)
+            tls_config: TLS configuration with truststore/keystore for certificate verification (optional)
             circuit_breaker_enabled: Enable circuit breaker pattern (default: True)
             circuit_breaker_failure_threshold: Failures before opening circuit (default: 5)
             circuit_breaker_recovery_timeout: Seconds before attempting recovery (default: 60.0)
@@ -71,6 +76,7 @@ class FAMAssetCatalogClient:
         self._auth_type = auth_type.lower()
         self._timeout = timeout
         self._verify_ssl = verify_ssl
+        self._tls_config = tls_config
 
         # Store auth credentials for token refresh
         self._api_key = api_key
@@ -97,7 +103,10 @@ class FAMAssetCatalogClient:
         else:
             raise ValueError(f"Invalid auth_type '{auth_type}'. Must be 'basic' or 'apikey'")
 
-        self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers, verify=verify_ssl)
+        # Create SSL context if TLS config is provided
+        ssl_context = self._create_ssl_context() if tls_config else verify_ssl
+        
+        self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers, verify=ssl_context)
         self._endpoint = f"{self.base_url}{FAMEndpoints.SERVERS_BASE.format(runtime_id=self.runtime_id)}"
 
         # Initialize circuit breaker
@@ -108,11 +117,90 @@ class FAMAssetCatalogClient:
         else:
             self._circuit_breaker = None
             logger.info("Circuit breaker disabled")
+        
+        # Log TLS configuration status
+        if tls_config:
+            tls_mode = "mutual TLS (two-way)" if tls_config.is_mutual_tls() else "one-way SSL"
+            logger.info(f"TLS enabled with {tls_mode} using truststore: {tls_config.truststore_path}")
+        elif verify_ssl:
+            logger.info("SSL verification enabled using system CA certificates")
+        else:
+            logger.warning("SSL verification disabled - connections are not secure!")
 
     async def close(self) -> None:
         """Close HTTP client and release resources."""
         if self._http_client:
             await self._http_client.aclose()
+
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create SSL context from TLS configuration.
+        
+        Returns:
+            Configured SSL context for HTTPS connections
+            
+        Raises:
+            ValueError: If TLS configuration is invalid
+            FileNotFoundError: If certificate files are not found
+            ssl.SSLError: If SSL context creation fails
+        """
+        if not self._tls_config:
+            raise ValueError("TLS config is required to create SSL context")
+        
+        tls_cfg = self._tls_config
+        
+        try:
+            # Create SSL context with secure defaults
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            
+            # Load truststore (CA certificates for server verification)
+            truststore_path = Path(tls_cfg.truststore_path)
+            if not truststore_path.exists():
+                raise FileNotFoundError(f"Truststore file not found: {tls_cfg.truststore_path}")
+            
+            if tls_cfg.truststore_type == "PEM":
+                # PEM format - load as CA file
+                context.load_verify_locations(cafile=str(truststore_path))
+                logger.debug(f"Loaded PEM truststore from {tls_cfg.truststore_path}")
+            else:
+                # JKS or PKCS12 format - Python's ssl module doesn't support these directly
+                # We need to convert them or use a library like jks or cryptography
+                raise ValueError(
+                    f"Truststore type '{tls_cfg.truststore_type}' not directly supported. "
+                    "Please convert to PEM format or use PEM certificates. "
+                    "For JKS: keytool -exportcert -keystore truststore.jks -rfc -file truststore.pem"
+                )
+            
+            # Load keystore for mutual TLS (client certificate authentication)
+            if tls_cfg.is_mutual_tls():
+                keystore_path = Path(tls_cfg.keystore_path)  # type: ignore
+                if not keystore_path.exists():
+                    raise FileNotFoundError(f"Keystore file not found: {tls_cfg.keystore_path}")
+                
+                if tls_cfg.keystore_type == "PEM":
+                    # PEM format - load certificate and key
+                    # For PEM, keystore_path should point to cert file, and we assume key is in same file
+                    # or specified separately (Python ssl expects cert and key in same file or separate files)
+                    context.load_cert_chain(
+                        certfile=str(keystore_path),
+                        password=tls_cfg.keystore_password
+                    )
+                    logger.debug(f"Loaded PEM keystore from {tls_cfg.keystore_path}")
+                else:
+                    raise ValueError(
+                        f"Keystore type '{tls_cfg.keystore_type}' not directly supported. "
+                        "Please convert to PEM format. "
+                        "For PKCS12: openssl pkcs12 -in keystore.p12 -out keystore.pem -nodes"
+                    )
+            
+            logger.info(f"SSL context created successfully ({'mutual TLS' if tls_cfg.is_mutual_tls() else 'one-way SSL'})")
+            return context
+            
+        except ssl.SSLError as e:
+            logger.error(f"SSL error creating context: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error creating SSL context: {e}")
+            raise
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get current authentication headers.
@@ -152,9 +240,12 @@ class FAMAssetCatalogClient:
             
             logger.debug(f"Fetching bearer token from {token_url}")
             
+            # Create SSL context if TLS config is provided
+            ssl_context = self._create_ssl_context() if self._tls_config else self._verify_ssl
+            
             # Use a temporary client for token fetch to avoid circular dependency
             # (main client needs token, but we need to fetch token first)
-            async with httpx.AsyncClient(timeout=self._timeout, verify=self._verify_ssl) as temp_client:
+            async with httpx.AsyncClient(timeout=self._timeout, verify=ssl_context) as temp_client:
                 response = await temp_client.post(token_url, headers=headers, json={})
                 response.raise_for_status()
                 
@@ -565,21 +656,23 @@ class FAMAssetCatalogClient:
 
         POST /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers
 
+        If server already exists (409 Conflict), automatically calls update_server.
+
         Args:
             server: ContextForge Server ORM object
 
         Returns:
-            True if successful (including 409 Conflict - server already exists), False otherwise
+            True if successful (create or update), False otherwise
         """
 
         async def _do_create() -> bool:
             payload = FAMServerPayload.build_create_payload(server)
             response = await self._http_client.post(self._endpoint, json=payload, headers=self._get_auth_headers())
 
-            # Handle 409 Conflict as success (server already exists in IBM API Connect Federated API Management)
+            # Handle 409 Conflict by calling update instead
             if response.status_code == 409:
-                logger.info(f"Server {server.id} already exists in IBM API Connect Federated API Management (409 Conflict - treated as success)")
-                return True
+                logger.info(f"Server {server.id} already exists in FAM (409 Conflict), calling update API instead")
+                return await self.update_server(server)
 
             response.raise_for_status()
             logger.info(f"Created MCP Server {server.id} in IBM API Connect Federated API Management")
@@ -652,6 +745,10 @@ class FAMAssetCatalogClient:
         async def _do_bulk_create() -> Optional[str]:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/create"
             payloads = [FAMToolPayload.build_create_payload(tool, server_id) for tool in tools]
+            
+            logger.debug(f"FAM API Request URL: {url}")
+            logger.debug(f"FAM API Request Body (bulk create): {json.dumps(payloads, indent=2, default=str)}")
+            
             response = await self._http_client.post(url, json=payloads, headers=self._get_auth_headers())
             response.raise_for_status()
 
@@ -682,6 +779,10 @@ class FAMAssetCatalogClient:
         async def _do_bulk_update() -> Optional[str]:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/update"
             payloads = [FAMToolPayload.build_update_payload(tool) for tool in tools]
+            
+            logger.debug(f"FAM API Request URL: {url}")
+            logger.debug(f"FAM API Request Body (bulk update): {json.dumps(payloads, indent=2, default=str)}")
+            
             response = await self._http_client.post(url, json=payloads, headers=self._get_auth_headers())
             response.raise_for_status()
 
@@ -711,6 +812,10 @@ class FAMAssetCatalogClient:
 
         async def _do_bulk_delete() -> Optional[str]:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/delete"
+            
+            logger.debug(f"FAM API Request URL: {url}")
+            logger.debug(f"FAM API Request Body (bulk delete): {json.dumps(tool_ids, indent=2, default=str)}")
+            
             response = await self._http_client.post(url, json=tool_ids, headers=self._get_auth_headers())
             response.raise_for_status()
 

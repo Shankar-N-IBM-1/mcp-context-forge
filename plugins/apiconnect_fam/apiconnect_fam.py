@@ -17,6 +17,7 @@ Features:
 
 # Standard
 import logging
+import os
 from typing import List, Optional
 
 # Third-Party
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 # Local
 from .activity_orchestrator import ActivityOrchestrator
 from .fam import FAMAssetCatalogClient
+from .models import TLSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,14 @@ class APIConnectFAMConfig(BaseModel):
         fam_client_id: IBM API Connect Federated API Management client ID for API Key Authentication.
         fam_timeout: HTTP request timeout in seconds.
         fam_verify_ssl: Whether to verify SSL certificates (set False for self-signed certs).
+        fam_tls_truststore_path: Path to truststore file for SSL verification (PEM format).
+        fam_tls_truststore_password: Password for truststore (optional for PEM).
+        fam_tls_truststore_type: Truststore type (JKS, PKCS12, PEM) - default: PEM.
+        fam_tls_keystore_path: Path to keystore file for mutual TLS (optional, PEM format).
+        fam_tls_keystore_password: Password for keystore (required if keystore_path provided).
+        fam_tls_keystore_type: Keystore type (JKS, PKCS12, PEM) - default: PEM.
+        fam_tls_key_alias: Certificate alias in keystore (optional).
+        fam_tls_key_password: Private key password (optional).
         fam_asset_sync_enabled: Whether to sync assets (servers/tools) to IBM API Connect Federated API Management.
         fam_asset_sync_interval: How often to sync assets (in seconds).
         metrics_sync_enabled: Whether to sync metrics to IBM API Connect Federated API Management.
@@ -65,6 +75,7 @@ class APIConnectFAMConfig(BaseModel):
     Note:
         Runtime type is hardcoded to 'MCP_CONTEXT_FORGE' and will be auto-created if it doesn't exist in FAM.
         Authentication: Either use Basic Auth (username/password) or API Key (api_key/client_id).
+        TLS: If truststore_path is provided, it will be used for SSL verification instead of system CA certificates.
     """
 
     interval_seconds: int = 60
@@ -79,6 +90,17 @@ class APIConnectFAMConfig(BaseModel):
     fam_client_id: Optional[str] = Field(default=None, description="IBM API Connect Federated API Management client ID for API Key Authentication")
     fam_timeout: int = 30
     fam_verify_ssl: bool = True  # Verify SSL certificates by default
+    
+    # TLS Configuration
+    fam_tls_truststore_path: Optional[str] = Field(default=None, description="Path to truststore file (PEM format)")
+    fam_tls_truststore_password: Optional[str] = Field(default=None, description="Truststore password")
+    fam_tls_truststore_type: str = Field(default="PEM", description="Truststore type (JKS, PKCS12, PEM)")
+    fam_tls_keystore_path: Optional[str] = Field(default=None, description="Path to keystore file for mutual TLS (PEM format)")
+    fam_tls_keystore_password: Optional[str] = Field(default=None, description="Keystore password")
+    fam_tls_keystore_type: str = Field(default="PEM", description="Keystore type (JKS, PKCS12, PEM)")
+    fam_tls_key_alias: Optional[str] = Field(default=None, description="Certificate alias in keystore")
+    fam_tls_key_password: Optional[str] = Field(default=None, description="Private key password")
+    
     fam_asset_sync_enabled: bool = True
     fam_asset_sync_interval: int = 60  # Sync assets every 60 seconds
     metrics_sync_enabled: bool = False
@@ -106,10 +128,10 @@ class APIConnectFAMPlugin(Plugin):
     """
 
     def __init__(self, config: PluginConfig) -> None:
-        """Initialize the server monitor plugin.
+        """Initialize the APIConnect FAM plugin.
 
         Args:
-            config: Plugin configuration.
+            config: Plugin configuration from plugins/config.yaml.
         """
         super().__init__(config)
         self._cfg = APIConnectFAMConfig(**(config.config or {}))
@@ -151,6 +173,21 @@ class APIConnectFAMPlugin(Plugin):
             # Store runtime ID
             self._runtime_id = self._cfg.fam_runtime_id
 
+            # Create TLS config if truststore is provided
+            tls_config = None
+            if self._cfg.fam_tls_truststore_path:
+                tls_config = TLSConfig(
+                    truststore_path=self._cfg.fam_tls_truststore_path,
+                    truststore_password=self._cfg.fam_tls_truststore_password,
+                    truststore_type=self._cfg.fam_tls_truststore_type,
+                    keystore_path=self._cfg.fam_tls_keystore_path,
+                    keystore_password=self._cfg.fam_tls_keystore_password,
+                    keystore_type=self._cfg.fam_tls_keystore_type,
+                    key_alias=self._cfg.fam_tls_key_alias,
+                    key_password=self._cfg.fam_tls_key_password,
+                )
+                logger.info(f"TLS configuration loaded: {'mutual TLS' if tls_config.is_mutual_tls() else 'one-way SSL'}")
+            
             # Create FAM client with runtime ID (type assertions safe due to validation above)
             assert self._cfg.fam_base_url is not None
             assert self._runtime_id is not None
@@ -165,6 +202,7 @@ class APIConnectFAMPlugin(Plugin):
                 client_id=self._cfg.fam_client_id,
                 timeout=self._cfg.fam_timeout,
                 verify_ssl=self._cfg.fam_verify_ssl,
+                tls_config=tls_config,
             )
 
             logger.info(f"IBM API Connect Federated API Management sync enabled - HTTP client initialized with runtime_id={self._runtime_id}")
@@ -174,7 +212,7 @@ class APIConnectFAMPlugin(Plugin):
             logger.info(f"Metrics Sync: {'Enabled' if self._cfg.metrics_sync_enabled else 'Disabled'}")
             logger.info("Circuit Breaker: Enabled (default)")
 
-            # Initialize activity orchestrator
+            # Initialize activity orchestrator (always create, but only start on primary worker)
             self._orchestrator = ActivityOrchestrator(
                 fam_client=self._fam_client,
                 runtime_id=self._runtime_id,
@@ -186,10 +224,10 @@ class APIConnectFAMPlugin(Plugin):
                 tool_sync_interval=self._cfg.fam_asset_sync_interval if self._cfg.fam_asset_sync_enabled else 0,
             )
 
-            # Start orchestrator (will perform registration first, then start activities)
+            # Start orchestrator (will check if primary worker and only start activities if so)
             logger.info("Starting activity orchestrator...")
             await self._orchestrator.start()
-            logger.info("Activity orchestrator started - plugin ready")
+            logger.info("Activity orchestrator initialization complete")
 
     async def shutdown(self) -> None:
         """Stop the activity orchestrator and close HTTP client."""

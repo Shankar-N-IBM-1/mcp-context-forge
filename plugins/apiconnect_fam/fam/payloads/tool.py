@@ -43,6 +43,7 @@ class FAMToolPayload:
         - Whitespace
 
         Note: Colon (:) is NOT in the allowed character set per FAM API spec.
+        Backticks are converted to single quotes for better readability.
 
         Args:
             value: String value to sanitize
@@ -55,6 +56,9 @@ class FAMToolPayload:
 
         # Convert to string
         str_value = str(value)
+        
+        # Replace backticks with single quotes for better readability
+        str_value = str_value.replace("`", "'")
 
         # Allowed punctuation characters (matching FAM API safeString pattern exactly)
         # Note: colon (:) is explicitly NOT included
@@ -123,7 +127,7 @@ class FAMToolPayload:
         - description: string (optional)
         - format: string (optional)
 
-        Filters out ContextForge-specific extension fields (x-* prefixed).
+        Filters out any attributes not in the MCPToolSchema specification.
         Handles anyOf schemas by extracting type from first option.
 
         Each property in 'properties' can be:
@@ -139,30 +143,30 @@ class FAMToolPayload:
         if not schema_dict or not isinstance(schema_dict, dict):
             return None
 
-        # Create a copy to avoid modifying the original
-        schema = dict(schema_dict)
+        # Define allowed MCPToolSchema attributes per FAM API spec
+        ALLOWED_SCHEMA_ATTRS = {"type", "properties", "required", "description", "format"}
 
-        # Remove ContextForge-specific extension fields (x-* prefixed)
-        # These are not part of the FAM API schema specification
-        keys_to_remove = [key for key in schema.keys() if key.startswith("x-")]
-        for key in keys_to_remove:
-            del schema[key]
-
-        # Handle anyOf schemas - extract type from first option
+        # Create a new schema with only allowed attributes
+        schema = {}
+        
+        # Handle anyOf schemas first - extract type from first option
         # FAM API doesn't support anyOf, so we use the first type as the canonical type
-        if "anyOf" in schema and isinstance(schema["anyOf"], list) and len(schema["anyOf"]) > 0:
-            first_option = schema["anyOf"][0]
-            if isinstance(first_option, dict) and "type" in first_option:
-                schema["type"] = first_option["type"]
-                # Copy other relevant fields from first option
-                if "items" in first_option:
-                    schema["items"] = first_option["items"]
-                if "properties" in first_option:
-                    schema["properties"] = first_option["properties"]
-                if "required" in first_option:
-                    schema["required"] = first_option["required"]
-            # Remove anyOf after extracting type
-            del schema["anyOf"]
+        if "anyOf" in schema_dict and isinstance(schema_dict["anyOf"], list) and len(schema_dict["anyOf"]) > 0:
+            first_option = schema_dict["anyOf"][0]
+            if isinstance(first_option, dict):
+                # Merge first option into schema_dict for processing
+                for key in ALLOWED_SCHEMA_ATTRS:
+                    if key in first_option:
+                        schema_dict[key] = first_option[key]
+
+        # Copy only allowed attributes from source schema
+        for key in ALLOWED_SCHEMA_ATTRS:
+            if key in schema_dict:
+                # Sanitize and truncate description fields (max 300 chars per FAM API)
+                if key == "description":
+                    schema[key] = FAMToolPayload._truncate_string(schema_dict[key], 300)
+                else:
+                    schema[key] = schema_dict[key]
 
         # Ensure required 'type' field exists
         if "type" not in schema:
@@ -177,7 +181,7 @@ class FAMToolPayload:
             normalized_properties = {}
             for prop_name, prop_value in schema["properties"].items():
                 if isinstance(prop_value, dict):
-                    # Recursively normalize all property schemas (handles anyOf, x-*, etc.)
+                    # Recursively normalize all property schemas (filters non-allowed attrs)
                     prop_value = FAMToolPayload._build_schema(prop_value) or prop_value
 
                     # Ensure each property has a 'type' field after normalization
@@ -190,6 +194,10 @@ class FAMToolPayload:
                     normalized_properties[prop_name] = {"type": "string"}
 
             schema["properties"] = normalized_properties
+
+        # Recursively process items for array types
+        if "items" in schema and isinstance(schema["items"], dict):
+            schema["items"] = FAMToolPayload._build_schema(schema["items"]) or schema["items"]
 
         # Ensure 'required' is a list if present
         if "required" in schema and not isinstance(schema["required"], list):
@@ -234,6 +242,8 @@ class FAMToolPayload:
         Required fields: mcpServerId, name, inputSchema
         Optional fields: mcpToolId, description, requestType, outputSchema, annotations, tags, owner
 
+        Includes all properties that FAM uses for change detection to ensure accurate sync.
+
         Args:
             tool: ContextForge Tool ORM object
             server_id: Parent MCP Server ID
@@ -253,16 +263,16 @@ class FAMToolPayload:
             "inputSchema": input_schema,
         }
 
-        # Optional mcpToolId
+        # Optional mcpToolId (critical for updates)
         if hasattr(tool, "id") and tool.id:
             payload["mcpToolId"] = cls._truncate_string(str(tool.id), 255)
 
-        # Optional description
-        description = cls._truncate_string(tool.description or tool.original_description, 1000)
+        # Optional description (max 300 chars per FAM API validation)
+        description = cls._truncate_string(tool.description or tool.original_description, 300)
         if description:
             payload["description"] = description
 
-        # Optional requestType
+        # Optional requestType (always include for consistency)
         payload["requestType"] = cls._get_request_type(tool)
 
         # Optional outputSchema
@@ -275,10 +285,50 @@ class FAMToolPayload:
         if annotations:
             payload["annotations"] = annotations
 
-        # Optional tags
+        # Optional tags (always include even if empty for consistency)
         tags = cls._get_tags(tool)
         if tags:
             payload["tags"] = tags
+
+        # Optional enabled flag (include for visibility control)
+        if hasattr(tool, "enabled"):
+            payload["enabled"] = bool(tool.enabled)
+
+        # Optional custom_name for display purposes
+        if hasattr(tool, "custom_name") and tool.custom_name:
+            payload["customName"] = cls._truncate_string(tool.custom_name, 255)
+
+        # Optional display_name
+        if hasattr(tool, "display_name") and tool.display_name:
+            payload["displayName"] = cls._truncate_string(tool.display_name, 255)
+
+        # Optional title
+        if hasattr(tool, "title") and tool.title:
+            payload["title"] = cls._truncate_string(tool.title, 255)
+
+        # Optional url
+        if hasattr(tool, "url") and tool.url:
+            payload["url"] = cls._truncate_string(tool.url, 767)
+
+        # Optional headers
+        if hasattr(tool, "headers") and tool.headers:
+            payload["headers"] = tool.headers
+
+        # Optional integration_type
+        if hasattr(tool, "integration_type") and tool.integration_type:
+            payload["integrationType"] = tool.integration_type
+
+        # Optional visibility
+        if hasattr(tool, "visibility") and tool.visibility:
+            payload["visibility"] = tool.visibility
+
+        # Optional team_id
+        if hasattr(tool, "team_id") and tool.team_id:
+            payload["teamId"] = tool.team_id
+
+        # Optional owner_email
+        if hasattr(tool, "owner_email") and tool.owner_email:
+            payload["ownerEmail"] = tool.owner_email
 
         return payload
 
@@ -288,6 +338,8 @@ class FAMToolPayload:
 
         mcpToolId is mandatory for bulk update operations.
         All other fields are optional in update schema.
+
+        Includes all properties that FAM uses for change detection to ensure accurate sync.
 
         Args:
             tool: ContextForge Tool ORM object
@@ -311,7 +363,7 @@ class FAMToolPayload:
         if description:
             payload["description"] = description
 
-        # Optional requestType
+        # Optional requestType (always include for consistency)
         payload["requestType"] = cls._get_request_type(tool)
 
         # Optional inputSchema
@@ -329,9 +381,49 @@ class FAMToolPayload:
         if annotations:
             payload["annotations"] = annotations
 
-        # Optional tags
+        # Optional tags (always include even if empty for consistency)
         tags = cls._get_tags(tool)
         if tags:
             payload["tags"] = tags
+
+        # Optional enabled flag (include for visibility control)
+        if hasattr(tool, "enabled"):
+            payload["enabled"] = bool(tool.enabled)
+
+        # Optional custom_name for display purposes
+        if hasattr(tool, "custom_name") and tool.custom_name:
+            payload["customName"] = cls._truncate_string(tool.custom_name, 255)
+
+        # Optional display_name
+        if hasattr(tool, "display_name") and tool.display_name:
+            payload["displayName"] = cls._truncate_string(tool.display_name, 255)
+
+        # Optional title
+        if hasattr(tool, "title") and tool.title:
+            payload["title"] = cls._truncate_string(tool.title, 255)
+
+        # Optional url
+        if hasattr(tool, "url") and tool.url:
+            payload["url"] = cls._truncate_string(tool.url, 767)
+
+        # Optional headers
+        if hasattr(tool, "headers") and tool.headers:
+            payload["headers"] = tool.headers
+
+        # Optional integration_type
+        if hasattr(tool, "integration_type") and tool.integration_type:
+            payload["integrationType"] = tool.integration_type
+
+        # Optional visibility
+        if hasattr(tool, "visibility") and tool.visibility:
+            payload["visibility"] = tool.visibility
+
+        # Optional team_id
+        if hasattr(tool, "team_id") and tool.team_id:
+            payload["teamId"] = tool.team_id
+
+        # Optional owner_email
+        if hasattr(tool, "owner_email") and tool.owner_email:
+            payload["ownerEmail"] = tool.owner_email
 
         return payload

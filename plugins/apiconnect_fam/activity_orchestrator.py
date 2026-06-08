@@ -27,27 +27,6 @@ from .models import ActivityContext
 logger = logging.getLogger(__name__)
 
 
-def _is_primary_worker() -> bool:
-    """Check if this is the primary worker (worker 1) in a multi-worker deployment.
-    
-    In single-worker deployments (uvicorn --reload), always returns True.
-    In multi-worker deployments (gunicorn), only returns True for worker 1.
-    
-    Returns:
-        True if this is the primary worker or single-worker deployment
-    """
-    # Check for gunicorn worker ID (format: "0", "1", "2", etc.)
-    worker_id = os.environ.get("GUNICORN_WORKER_ID")
-    if worker_id is not None:
-        is_primary = worker_id == "1"
-        logger.info(f"Gunicorn worker detected: worker_id={worker_id}, is_primary={is_primary}")
-        return is_primary
-    
-    # Single-worker deployment (uvicorn, or gunicorn with 1 worker)
-    logger.info("Single-worker deployment detected (no GUNICORN_WORKER_ID)")
-    return True
-
-
 class ActivityOrchestrator:
     """Orchestrates all activities for the Server Monitor Plugin.
 
@@ -116,6 +95,7 @@ class ActivityOrchestrator:
         # Create heartbeat activity (mandatory)
         self.heartbeat_activity = SendHeartbeatActivity(context=self.context, fam_client=fam_client, heartbeat_interval=heartbeat_interval)
         self.activities.append(self.heartbeat_activity)
+        logger.info(f"Heartbeat activity created with interval={heartbeat_interval}s")
 
         # Create metrics activity (optional, only if interval > 0)
         self.metrics_activity: Optional[SendMetricsActivity] = None
@@ -144,16 +124,13 @@ class ActivityOrchestrator:
         else:
             logger.info("Tool asset sync disabled")
 
-        # Track if servers have been synced (for tool sync dependency)
-        self._servers_synced_this_cycle = False
-
         # Track if runtime has been registered to FAM
         # Server and tool sync should only happen AFTER runtime registration
         self._runtime_registered = False
 
         # Orchestrator state
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._activity_tasks: Dict[str, asyncio.Task] = {}  # activity_name -> task
 
         # Shared state for activity coordination
         # Track which servers have been registered to FAM
@@ -206,22 +183,53 @@ class ActivityOrchestrator:
         self._runtime_registered = True
         logger.info("Runtime marked as registered - server and tool sync now enabled")
 
+    def _is_primary_worker(self) -> bool:
+        """Check if this is the primary worker.
+        
+        Returns True if:
+        - Not running under Gunicorn (GUNICORN_WORKER_ID not set)
+        - Running as worker_id=1 (primary worker)
+        
+        This check must be done at runtime (in start()), not during plugin
+        initialization, because Gunicorn sets GUNICORN_WORKER_ID after
+        the plugin's initialize() method runs.
+        """
+        worker_id = os.environ.get("GUNICORN_WORKER_ID")
+        
+        if worker_id is None:
+            is_primary = True
+        else:
+            try:
+                worker_id_int = int(worker_id)
+                is_primary = worker_id_int == 1
+            except (ValueError, TypeError) as e:
+                is_primary = False
+        
+        logger.info(f"Worker check: worker_id={worker_id or 'N/A'}, is_primary={is_primary}")
+        return is_primary
+
     async def start(self) -> None:
         """Start the orchestrator and begin activity execution.
 
-        Performs runtime registration first, then starts the activity loop.
+        Checks if this is the primary worker before starting activities.
+        Only the primary worker (worker_id=1) runs background activities.
+        
+        Creates a single coordinator task that manages all activity execution.
         """
-        # Check if this is the primary worker
-        if not _is_primary_worker():
-            logger.info("This is not the primary worker - orchestrator will remain inactive (no background tasks)")
-            logger.info("Only worker 1 runs background tasks to prevent duplicate FAM API calls")
-            return
-
-        logger.info("This is the primary worker - orchestrator will start background tasks")
-
+        
         if self._running:
             logger.warning("ActivityOrchestrator already running")
             return
+
+        # Check if this is the primary worker (must be done here, not in plugin init)
+        is_primary = self._is_primary_worker()
+        
+        if not is_primary:
+            worker_id = os.environ.get("GUNICORN_WORKER_ID")
+            logger.info(f"Skipping activity orchestrator on non-primary worker (worker_id={worker_id})")
+            return
+
+        logger.info("Starting activity orchestrator on primary worker")
 
         # Execute runtime registration before starting activities
         logger.info("Executing runtime registration activity")
@@ -238,82 +246,149 @@ class ActivityOrchestrator:
             logger.error(error_msg, exc_info=True)
             raise
 
-        # Start activity execution loop
+        # Start the coordinator task that manages all activities
         self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        logger.info("ActivityOrchestrator started")
+        
+        # Create single coordinator task
+        coordinator_task = asyncio.create_task(self._run_coordinator(), name="activity_coordinator")
+        self._activity_tasks["coordinator"] = coordinator_task
+        
+        logger.info("Activity coordinator task started")
+        
+        # Give coordinator a moment to start
+        await asyncio.sleep(0.1)
 
     async def stop(self) -> None:
-        """Stop the orchestrator and cancel all activities."""
-        if not self._running:
-            logger.warning("ActivityOrchestrator not running")
+        """Stop the orchestrator and cancel all activity tasks."""
+        if not self._running and not self._activity_tasks:
+            logger.warning("ActivityOrchestrator not running and no tasks to cancel")
             return
 
         self._running = False
 
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        # Cancel all activity tasks (even if _running was already False)
+        cancelled_count = 0
+        for activity_name, task in self._activity_tasks.items():
+            if not task.done():
+                task.cancel()
+                cancelled_count += 1
+                logger.info(f"Cancelled activity task: {activity_name}")
+        
+        # Wait for all tasks to complete cancellation
+        if self._activity_tasks:
+            await asyncio.gather(*self._activity_tasks.values(), return_exceptions=True)
+        
+        self._activity_tasks.clear()
+        logger.info(f"ActivityOrchestrator stopped - cancelled {cancelled_count} activity tasks")
 
-        logger.info("ActivityOrchestrator stopped")
-
-    async def _run_loop(self) -> None:
-        """Main execution loop for activities.
-
-        Continuously checks and executes activities that are due.
-        Runs every second to check activity schedules.
-
-        IMPORTANT: Enforces dependency that servers must sync before tools,
-        because tools need the FAM server ID as mcpServerId.
+    async def _run_coordinator(self) -> None:
+        """Coordinator task that manages all activity execution.
+        
+        This single task creates and manages individual activity tasks,
+        ensuring they continue running for the lifetime of the application.
         """
-        logger.info("ActivityOrchestrator execution loop started")
+        logger.info("Activity coordinator started")
+        
+        # Create individual activity tasks
+        activity_tasks = {}
+        for activity in self.activities:
+            activity_name = activity.__class__.__name__
+            task = asyncio.create_task(
+                self._run_activity_loop(activity),
+                name=f"activity_{activity_name}"
+            )
+            activity_tasks[activity_name] = task
+        
+        logger.info(f"Coordinator managing {len(activity_tasks)} activity tasks")
+        
+        # Monitor tasks and keep them alive
+        try:
+            while self._running:
+                # Check if any tasks have died and restart them
+                for activity_name, task in list(activity_tasks.items()):
+                    if task.done():
+                        logger.warning(f"Activity task {activity_name} died, restarting")
+                        
+                        # Find the activity and restart its task
+                        activity = next((a for a in self.activities if a.__class__.__name__ == activity_name), None)
+                        if activity:
+                            new_task = asyncio.create_task(
+                                self._run_activity_loop(activity),
+                                name=f"activity_{activity_name}"
+                            )
+                            activity_tasks[activity_name] = new_task
+                
+                # Sleep before next check
+                await asyncio.sleep(120)
+        
+        except asyncio.CancelledError:
+            logger.info("Activity coordinator cancelled")
+            # Cancel all activity tasks
+            for task in activity_tasks.values():
+                task.cancel()
+            raise
+        
+        logger.info("Activity coordinator stopped")
 
+    async def _run_activity_loop(self, activity: Any) -> None:
+        """Independent execution loop for a single activity.
+        
+        Each activity runs in its own task with simple interval-based scheduling.
+        Executes immediately on first run, then sleeps for the interval duration.
+        
+        Args:
+            activity: The activity instance to run
+        """
+        activity_name = activity.__class__.__name__
+        interval = activity.get_interval_seconds()
+        logger.info(f"Activity scheduler started for: {activity_name} (interval={interval}s)")
+        
+        # Initial small delay to stagger activity starts (prevents thundering herd)
+        await asyncio.sleep(0.1)
+        
         while self._running:
             try:
-                # Reset server sync flag at start of each cycle
-                self._servers_synced_this_cycle = False
-
-                # Execute activities in dependency order
-                for activity in self.activities:
-                    if activity.should_execute():
-                        # Special handling for server sync - must wait for runtime registration
-                        if activity == self.server_sync_activity:
-                            if not self._runtime_registered:
-                                logger.debug("Skipping server sync - waiting for runtime registration to complete first")
-                                continue
-
-                        # Special handling for tool sync - must wait for runtime registration AND server sync
-                        if activity == self.tool_sync_activity:
-                            if not self._runtime_registered:
-                                logger.debug("Skipping tool sync - waiting for runtime registration to complete first")
-                                continue
-                            if not self._servers_synced_this_cycle:
-                                logger.debug("Skipping tool sync - waiting for server sync to complete first")
-                                continue
-
-                        try:
-                            await activity.execute()
-
-                            # Track if servers were synced
-                            if activity == self.server_sync_activity:
-                                self._servers_synced_this_cycle = True
-                                logger.debug("Server sync completed - tools can now sync")
-
-                        except Exception as e:
-                            logger.error(f"Error executing activity {activity.__class__.__name__}: {e}", exc_info=True)
-
-                # Sleep for 1 second before next check
-                await asyncio.sleep(1)
-
+                # Dependency checks for specific activities
+                should_skip = False
+                skip_reason = ""
+                
+                # Server sync requires runtime registration
+                if activity == self.server_sync_activity:
+                    if not self._runtime_registered:
+                        should_skip = True
+                        skip_reason = "waiting for runtime registration"
+                
+                # Tool sync requires both runtime registration AND at least one server synced
+                elif activity == self.tool_sync_activity:
+                    if not self._runtime_registered:
+                        should_skip = True
+                        skip_reason = "waiting for runtime registration"
+                    elif not self._registered_servers:
+                        should_skip = True
+                        skip_reason = "waiting for at least one server to be synced"
+                
+                if should_skip:
+                    logger.debug(f"Skipping {activity_name} - {skip_reason}")
+                else:
+                    try:
+                        # Execute the activity
+                        await activity.execute()
+                        logger.debug(f"Activity {activity_name} executed successfully")
+                    except Exception as e:
+                        logger.error(f"Error executing activity {activity_name}: {e}", exc_info=True)
+                
+                # Sleep for the interval duration after execution
+                await asyncio.sleep(interval)
+                
             except asyncio.CancelledError:
-                logger.info("ActivityOrchestrator execution loop cancelled")
+                logger.info(f"Activity scheduler cancelled for: {activity_name}")
                 break
             except Exception as e:
-                logger.error(f"Error in orchestrator execution loop: {e}", exc_info=True)
-                await asyncio.sleep(5)  # Back off on error
+                logger.error(f"Error in activity scheduler for {activity_name}: {e}", exc_info=True)
+                # On error, back off before retrying
+                await asyncio.sleep(min(interval, 60))
+        
+        logger.info(f"Activity scheduler stopped for: {activity_name}")
 
     async def trigger_recovery(self) -> None:
         """Trigger recovery of missed operations.

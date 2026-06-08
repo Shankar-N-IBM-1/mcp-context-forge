@@ -45,7 +45,16 @@ class ToolStateTracker(AbstractStateTracker):
     def compute_hash(entity: Any) -> str:
         """Compute SHA-256 hash of tool content.
 
-        Includes: name, description, enabled, tags, request_type, input_schema, output_schema
+        Only includes fields that FAM API accepts (matches FAMToolPayload logic):
+        - name (required, from original_name or custom_name)
+        - description (optional, max 300 chars)
+        - requestType (optional, HTTP or SSE)
+        - inputSchema (required)
+        - outputSchema (optional)
+        - annotations (optional)
+        - tags (optional)
+        - enabled (optional)
+        - customName (optional, for display)
 
         Args:
             entity: ContextForge Tool ORM object
@@ -59,8 +68,10 @@ class ToolStateTracker(AbstractStateTracker):
             "enabled": entity.enabled,
             "tags": sorted(entity.tags) if entity.tags else [],
             "request_type": entity.request_type,
+            "custom_name": entity.custom_name,
             "input_schema": json.dumps(entity.input_schema, sort_keys=True) if entity.input_schema else "",
             "output_schema": json.dumps(entity.output_schema, sort_keys=True) if entity.output_schema else "",
+            "annotations": json.dumps(entity.annotations, sort_keys=True) if entity.annotations else "",
         }
         return AbstractStateTracker._compute_hash_from_dict(tool_data)
 
@@ -193,6 +204,19 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 if operations["create"]:
                     self.logger.debug(f"{len(operations['create'])} NEW tools to create")
                     self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/create")
+                    
+                    tool_names = [tool.original_name or tool.custom_name for tool in operations["create"]]
+                    self.logger.debug(f"Creating tools: {tool_names}")
+                    for tool in operations["create"]:
+                        tool_data = {
+                            "name": tool.original_name or tool.custom_name,
+                            "description": tool.description or tool.original_description,
+                            "enabled": tool.enabled,
+                            "tags": tool.tags,
+                            "request_type": tool.request_type,
+                        }
+                        self.logger.debug(f"Tool data: {tool_data}")
+                    
                     job_id = await self._fam_client.bulk_create_tools(operations["create"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk create job submitted: {job_id}")
@@ -209,6 +233,19 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 if operations["update"]:
                     self.logger.debug(f"{len(operations['update'])} CHANGED tools to update")
                     self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/update")
+                    
+                    tool_names = [tool.original_name or tool.custom_name for tool in operations["update"]]
+                    self.logger.debug(f"Updating tools: {tool_names}")
+                    for tool in operations["update"]:
+                        tool_data = {
+                            "name": tool.original_name or tool.custom_name,
+                            "description": tool.description or tool.original_description,
+                            "enabled": tool.enabled,
+                            "tags": tool.tags,
+                            "request_type": tool.request_type,
+                        }
+                        self.logger.debug(f"Tool data: {tool_data}")
+                    
                     job_id = await self._fam_client.bulk_update_tools(operations["update"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk update job submitted: {job_id}")
@@ -225,6 +262,9 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 if operations["delete"]:
                     self.logger.debug(f"{len(operations['delete'])} tools to delete")
                     self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/delete")
+                    
+                    self.logger.debug(f"Deleting tool IDs: {operations['delete']}")
+                    
                     job_id = await self._fam_client.bulk_delete_tools(operations["delete"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk delete job submitted: {job_id}")
@@ -238,17 +278,19 @@ class SyncToolsActivity(AbstractScheduledActivity):
             self.logger.info(f"Synced {total_synced} tools to FAM using bulk operations")
             return total_synced
 
-    def _build_tool_server_mapping(self, servers: List[Any], registered_servers: Set[str]) -> Dict[str, str]:
-        """Build mapping from tool ID to server ID.
+    def _build_tool_server_mapping(self, servers: List[Any], registered_servers: Set[str]) -> Dict[str, List[str]]:
+        """Build mapping from tool ID to list of server IDs (many-to-many).
+
+        A tool can belong to multiple servers, so we track all server associations.
 
         Args:
             servers: List of Server ORM objects
             registered_servers: Set of server IDs that have been synced to FAM
 
         Returns:
-            Dict mapping tool_id to server_id (only for registered servers)
+            Dict mapping tool_id to list of server_ids (only for registered servers)
         """
-        tool_to_server = {}
+        tool_to_servers: Dict[str, List[str]] = defaultdict(list)
         for server in servers:
             server_id = str(server.id)
 
@@ -258,46 +300,59 @@ class SyncToolsActivity(AbstractScheduledActivity):
 
             if hasattr(server, "tools") and server.tools:
                 for tool in server.tools:
-                    tool_to_server[str(tool.id)] = server_id
+                    tool_id = str(tool.id)
+                    if server_id not in tool_to_servers[tool_id]:
+                        tool_to_servers[tool_id].append(server_id)
 
-        return tool_to_server
+        return dict(tool_to_servers)
 
-    def _group_tools_by_server_and_operation(self, tools: List[Any], tool_to_server: Dict[str, str]) -> Dict[str, Dict[str, List]]:
+    def _group_tools_by_server_and_operation(self, tools: List[Any], tool_to_servers: Dict[str, List[str]]) -> Dict[str, Dict[str, List[Any]]]:
         """Group tools by server and operation type (create/update/delete).
+
+        Handles many-to-many tool-server relationships - each tool is synced to ALL its associated servers.
 
         Args:
             tools: List of Tool ORM objects
-            tool_to_server: Mapping from tool ID to FAM server ID
+            tool_to_servers: Mapping from tool ID to list of FAM server IDs
 
         Returns:
             Dict mapping server_id to operations dict with create/update/delete lists
         """
         # Initialize structure: {server_id: {create: [], update: [], delete: []}}
-        tools_by_server: Dict[str, Dict[str, List]] = defaultdict(lambda: {"create": [], "update": [], "delete": []})
+        tools_by_server: Dict[str, Dict[str, List[Any]]] = defaultdict(lambda: {"create": [], "update": [], "delete": []})
 
         current_tool_ids = {str(tool.id) for tool in tools}
 
         # Detect deleted tools
         deleted_ids = self._state_tracker.get_deleted_tools(current_tool_ids)
         for tool_id in deleted_ids:
-            server_id = tool_to_server.get(tool_id)
-            if server_id:
+            server_ids = tool_to_servers.get(tool_id, [])
+            # Delete from ALL servers this tool was associated with
+            for server_id in server_ids:
                 tools_by_server[server_id]["delete"].append(tool_id)
 
         # Classify current tools
         for tool in tools:
             tool_id = str(tool.id)
-            server_id = tool_to_server.get(tool_id)
+            server_ids = tool_to_servers.get(tool_id, [])
 
-            if not server_id:
+            if not server_ids:
                 # Tool not associated with any synced server, skip
                 continue
 
             current_hash = self._state_tracker.compute_hash(tool)
+            
+            cached_hash = self._state_tracker.get_cached_hash(tool_id)
+            
+            is_new = self._state_tracker.is_new_tool(tool_id)
+            has_changed = self._state_tracker.has_changed(tool_id, current_hash)
 
-            if self._state_tracker.is_new_tool(tool_id):
-                tools_by_server[server_id]["create"].append(tool)
-            elif self._state_tracker.has_changed(tool_id, current_hash):
-                tools_by_server[server_id]["update"].append(tool)
+            # Sync tool to ALL its associated servers
+            for server_id in server_ids:
+                if is_new:
+                    tools_by_server[server_id]["create"].append(tool)
+                elif has_changed:
+                    tools_by_server[server_id]["update"].append(tool)
+                # else: tool unchanged, no action needed
 
         return dict(tools_by_server)

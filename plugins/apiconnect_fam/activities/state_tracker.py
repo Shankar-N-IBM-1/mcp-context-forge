@@ -92,6 +92,17 @@ class AbstractStateTracker(ABC):
         """
         self._cache.pop(entity_id, None)
 
+    def get_cached_hash(self, entity_id: str) -> str | None:
+        """Get cached hash for an entity.
+
+        Args:
+            entity_id: Entity identifier
+
+        Returns:
+            Cached hash string or None if not found
+        """
+        return self._cache.get(entity_id)
+
     def get_deleted_entities(self, current_entity_ids: Set[str]) -> Set[str]:
         """Get entities that were synced to FAM but no longer exist in DB.
 

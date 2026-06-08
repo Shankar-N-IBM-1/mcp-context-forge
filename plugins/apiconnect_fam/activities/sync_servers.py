@@ -9,7 +9,7 @@ Syncs MCP servers to FAM Asset Catalog.
 """
 
 # Standard
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, List, Optional, TYPE_CHECKING
 
 # First-Party
 from mcpgateway.db import Server, SessionLocal
@@ -39,7 +39,13 @@ class ServerStateTracker(AbstractStateTracker):
     def compute_hash(entity: Any) -> str:
         """Compute SHA-256 hash of server content.
 
-        Includes: name, description, enabled, url
+        Only includes fields that FAM API accepts (matches FAMServerPayload logic):
+        - name (required)
+        - description (optional)
+        - enabled (maps to status: ACTIVE/INACTIVE)
+        - url (optional)
+        - tags (optional, sorted for consistency)
+        - capabilities (derived from tools/resources/prompts relationships)
 
         Args:
             entity: ContextForge Server ORM object
@@ -47,11 +53,22 @@ class ServerStateTracker(AbstractStateTracker):
         Returns:
             SHA-256 hash string
         """
+        # Derive capabilities from relationships (matches FAMServerPayload._get_capabilities)
+        capabilities: List[str] = []
+        if hasattr(entity, "tools") and entity.tools and len(entity.tools) > 0:
+            capabilities.append("TOOLS")
+        if hasattr(entity, "resources") and entity.resources and len(entity.resources) > 0:
+            capabilities.append("RESOURCES")
+        if hasattr(entity, "prompts") and entity.prompts and len(entity.prompts) > 0:
+            capabilities.append("PROMPTS")
+        
         server_data = {
             "name": entity.name,
             "description": entity.description,
             "enabled": entity.enabled,
             "url": entity.url if hasattr(entity, "url") else None,
+            "tags": sorted(entity.tags) if hasattr(entity, "tags") and entity.tags else [],
+            "capabilities": sorted(capabilities),  # Sort for consistency
         }
         return AbstractStateTracker._compute_hash_from_dict(server_data)
 
@@ -148,6 +165,7 @@ class SyncServersActivity(AbstractScheduledActivity):
             for server in servers:
                 try:
                     server_id = str(server.id)
+                    
 
                     # Compute hash for change detection
                     current_hash = self._state_tracker.compute_hash(server)
@@ -155,6 +173,8 @@ class SyncServersActivity(AbstractScheduledActivity):
                     # Check if server needs syncing
                     is_new = self._state_tracker.is_new_server(server_id)
                     has_changed = self._state_tracker.has_changed(server_id, current_hash)
+                    
+                    cached_hash = self._state_tracker.get_cached_hash(server_id)
 
                     if is_new:
                         self.logger.debug(f"Server {server_id} is NEW, syncing...")
