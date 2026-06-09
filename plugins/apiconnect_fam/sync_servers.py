@@ -161,28 +161,6 @@ class SyncServersActivity(AbstractScheduledActivity):
                 self.logger.debug("No servers to sync")
                 return 0
 
-            # Get current server IDs
-            current_server_ids = {str(server.id) for server in servers}
-
-            # Detect deleted servers
-            deleted_server_ids = self._state_tracker.get_deleted_entities(current_server_ids)
-            
-            # Delete servers from FAM
-            for server_id in deleted_server_ids:
-                try:
-                    self.logger.debug(f"Server {server_id} deleted from DB, deleting from FAM...")
-                    success = await self._fam_client.delete_server(server_id)
-                    if success:
-                        self.logger.debug(f"Server {server_id} deleted from FAM")
-                        self._state_tracker.mark_deleted(server_id)
-                        # Unmark server in orchestrator
-                        if self._orchestrator:
-                            self._orchestrator.unmark_server_synced(server_id)
-                    else:
-                        self.logger.warning(f"Failed to delete server {server_id} from FAM")
-                except Exception as e:
-                    self.logger.error(f"Error deleting server {server_id}: {e}", exc_info=True)
-
             synced_count = 0
             for server in servers:
                 try:
@@ -195,6 +173,8 @@ class SyncServersActivity(AbstractScheduledActivity):
                     # Check if server needs syncing
                     is_new = self._state_tracker.is_new_server(server_id)
                     has_changed = self._state_tracker.has_changed(server_id, current_hash)
+                    
+                    cached_hash = self._state_tracker.get_cached_hash(server_id)
 
                     if is_new:
                         self.logger.debug(f"Server {server_id} is NEW, syncing...")
@@ -211,7 +191,6 @@ class SyncServersActivity(AbstractScheduledActivity):
                     success = await self._fam_client.create_server(server)
 
                     if success:
-                        print(f"✓ Server created/updated in FAM: {server.id}\n")
                         self.logger.debug(f"Server created/updated in FAM: {server.id}")
                         # Mark as synced in state tracker
                         self._state_tracker.mark_synced(server_id, current_hash)
@@ -221,7 +200,6 @@ class SyncServersActivity(AbstractScheduledActivity):
                         if self._orchestrator:
                             self._orchestrator.mark_server_synced(server_id)
                     else:
-                        print(f"✗ Failed to sync server: {server.id}\n")
                         self.logger.warning(f"Failed to sync server: {server.id}")
 
                 except Exception as e:

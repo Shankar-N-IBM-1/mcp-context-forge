@@ -251,6 +251,8 @@ class FAMToolPayload:
         Returns:
             Dictionary matching MCPToolCreate schema
         """
+        import json
+        
         # Build input schema (required)
         input_schema = cls._build_schema(tool.input_schema)
         if not input_schema:
@@ -294,41 +296,15 @@ class FAMToolPayload:
         if hasattr(tool, "enabled"):
             payload["enabled"] = bool(tool.enabled)
 
-        # Optional custom_name for display purposes
-        if hasattr(tool, "custom_name") and tool.custom_name:
-            payload["customName"] = cls._truncate_string(tool.custom_name, 255)
-
-        # Optional display_name
-        if hasattr(tool, "display_name") and tool.display_name:
-            payload["displayName"] = cls._truncate_string(tool.display_name, 255)
-
-        # Optional title
-        if hasattr(tool, "title") and tool.title:
-            payload["title"] = cls._truncate_string(tool.title, 255)
-
-        # Optional url
-        if hasattr(tool, "url") and tool.url:
-            payload["url"] = cls._truncate_string(tool.url, 767)
-
-        # Optional headers
-        if hasattr(tool, "headers") and tool.headers:
-            payload["headers"] = tool.headers
-
-        # Optional integration_type
-        if hasattr(tool, "integration_type") and tool.integration_type:
-            payload["integrationType"] = tool.integration_type
-
-        # Optional visibility
-        if hasattr(tool, "visibility") and tool.visibility:
-            payload["visibility"] = tool.visibility
-
-        # Optional team_id
-        if hasattr(tool, "team_id") and tool.team_id:
-            payload["teamId"] = tool.team_id
-
-        # Optional owner_email
-        if hasattr(tool, "owner_email") and tool.owner_email:
-            payload["ownerEmail"] = tool.owner_email
+        print("\n" + "=" * 80)
+        print("FAM PAYLOAD: CREATE TOOL")
+        print("=" * 80)
+        print(f"Tool Name: {tool.original_name or tool.custom_name}")
+        print(f"Tool ID: {getattr(tool, 'id', 'N/A')}")
+        print(f"Server ID: {server_id}")
+        print(f"\nPayload:")
+        print(json.dumps(payload, indent=2, default=str))
+        print("=" * 80 + "\n")
 
         return payload
 
@@ -347,6 +323,8 @@ class FAMToolPayload:
         Returns:
             Dictionary matching MCPToolUpdate schema
         """
+        import json
+        
         payload: Dict[str, Any] = {}
         
         # Mandatory mcpToolId for bulk update
@@ -390,40 +368,13 @@ class FAMToolPayload:
         if hasattr(tool, "enabled"):
             payload["enabled"] = bool(tool.enabled)
 
-        # Optional custom_name for display purposes
-        if hasattr(tool, "custom_name") and tool.custom_name:
-            payload["customName"] = cls._truncate_string(tool.custom_name, 255)
-
-        # Optional display_name
-        if hasattr(tool, "display_name") and tool.display_name:
-            payload["displayName"] = cls._truncate_string(tool.display_name, 255)
-
-        # Optional title
-        if hasattr(tool, "title") and tool.title:
-            payload["title"] = cls._truncate_string(tool.title, 255)
-
-        # Optional url
-        if hasattr(tool, "url") and tool.url:
-            payload["url"] = cls._truncate_string(tool.url, 767)
-
-        # Optional headers
-        if hasattr(tool, "headers") and tool.headers:
-            payload["headers"] = tool.headers
-
-        # Optional integration_type
-        if hasattr(tool, "integration_type") and tool.integration_type:
-            payload["integrationType"] = tool.integration_type
-
-        # Optional visibility
-        if hasattr(tool, "visibility") and tool.visibility:
-            payload["visibility"] = tool.visibility
-
-        # Optional team_id
-        if hasattr(tool, "team_id") and tool.team_id:
-            payload["teamId"] = tool.team_id
-
-        # Optional owner_email
-        if hasattr(tool, "owner_email") and tool.owner_email:
-            payload["ownerEmail"] = tool.owner_email
+        print("\n" + "=" * 80)
+        print("FAM PAYLOAD: UPDATE TOOL")
+        print("=" * 80)
+        print(f"Tool Name: {tool.original_name or tool.custom_name}")
+        print(f"Tool ID: {getattr(tool, 'id', 'N/A')}")
+        print(f"\nPayload:")
+        print(json.dumps(payload, indent=2, default=str))
+        print("=" * 80 + "\n")
 
         return payload

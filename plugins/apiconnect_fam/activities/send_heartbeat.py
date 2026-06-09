@@ -81,32 +81,12 @@ class SendHeartbeatActivity(AbstractScheduledActivity):
         
         current_time = datetime.now(timezone.utc)
         
-        # TEMPORARY DEBUG LOGGING - REMOVE WHEN REQUESTED
-        print("\n" + "=" * 80)
-        print("SENDING HEARTBEAT TO FAM")
-        print("=" * 80)
-        print(f"Current timestamp: {current_time.isoformat()}")
-        print(f"Runtime ID: {self.context.runtime_id}")
-        print(f"Heartbeat interval: {self._heartbeat_interval}s")
-        print(f"Total heartbeats sent: {self._total_heartbeats_sent}")
-        print(f"Consecutive failures: {self._consecutive_failures}")
-        print("\nHeartbeat payload:")
-        print(f"  Runtime ID: {self.context.runtime_id}")
-        print("\nCalling FAM API: POST /api/engine/v2/runtimes/heartbeat")
-        # END TEMPORARY DEBUG LOGGING
-        
         self.logger.debug("Calling FAM API: POST /api/engine/v2/runtimes/heartbeat")
         self.logger.debug(f"Runtime ID: {self.context.runtime_id}")
 
         success = await self._fam_client.send_heartbeat(self.context.runtime_id)
 
-        # TEMPORARY DEBUG LOGGING - REMOVE WHEN REQUESTED
         if success:
-            print("✓ FAM API call successful")
-            print("=" * 80 + "\n")
             self.logger.debug("FAM API call successful")
         else:
-            print("✗ FAM API call failed")
-            print("=" * 80 + "\n")
             raise Exception("Heartbeat failed")
-        # END TEMPORARY DEBUG LOGGING

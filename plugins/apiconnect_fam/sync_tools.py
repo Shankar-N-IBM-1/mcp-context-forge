@@ -38,20 +38,8 @@ class ToolStateTracker(AbstractStateTracker):
     content hashes. Once a bulk job is submitted successfully, all tools in
     that batch are considered synced.
 
-    Also caches tool-to-server relationships to support delete operations
-    (when a tool is deleted from DB, we need to know which FAM servers to
-    delete it from).
-
     Extends AbstractStateTracker with tool-specific hash computation.
-    
-    Attributes:
-        _tool_servers: Maps tool_id to list of server_ids (cached relationships)
     """
-
-    def __init__(self):
-        """Initialize tool state tracker with empty caches."""
-        super().__init__()
-        self._tool_servers: Dict[str, List[str]] = {}
 
     @staticmethod
     def compute_hash(entity: Any) -> str:
@@ -66,6 +54,7 @@ class ToolStateTracker(AbstractStateTracker):
         - annotations (optional)
         - tags (optional)
         - enabled (optional)
+        - customName (optional, for display)
 
         Args:
             entity: ContextForge Tool ORM object
@@ -79,6 +68,7 @@ class ToolStateTracker(AbstractStateTracker):
             "enabled": entity.enabled,
             "tags": sorted(entity.tags) if entity.tags else [],
             "request_type": entity.request_type,
+            "custom_name": entity.custom_name,
             "input_schema": json.dumps(entity.input_schema, sort_keys=True) if entity.input_schema else "",
             "output_schema": json.dumps(entity.output_schema, sort_keys=True) if entity.output_schema else "",
             "annotations": json.dumps(entity.annotations, sort_keys=True) if entity.annotations else "",
@@ -110,34 +100,6 @@ class ToolStateTracker(AbstractStateTracker):
             Set of tool IDs that were deleted
         """
         return self.get_deleted_entities(current_tool_ids)
-
-    def cache_tool_servers(self, tool_id: str, server_ids: List[str]) -> None:
-        """Cache tool-to-server relationships.
-
-        Args:
-            tool_id: Tool identifier
-            server_ids: List of server IDs this tool is associated with
-        """
-        self._tool_servers[tool_id] = server_ids
-
-    def get_cached_tool_servers(self, tool_id: str) -> List[str]:
-        """Get cached server IDs for a tool.
-
-        Args:
-            tool_id: Tool identifier
-
-        Returns:
-            List of server IDs (empty list if not cached)
-        """
-        return self._tool_servers.get(tool_id, [])
-
-    def clear_tool_servers(self, tool_id: str) -> None:
-        """Clear cached server relationships for a tool.
-
-        Args:
-            tool_id: Tool identifier
-        """
-        self._tool_servers.pop(tool_id, None)
 
 
 class SyncToolsActivity(AbstractScheduledActivity):
@@ -258,14 +220,11 @@ class SyncToolsActivity(AbstractScheduledActivity):
                     job_id = await self._fam_client.bulk_create_tools(operations["create"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk create job submitted: {job_id}")
-                        # Mark all as synced and cache server relationships
+                        # Mark all as synced
                         for tool in operations["create"]:
                             tool_id = str(tool.id)
                             current_hash = self._state_tracker.compute_hash(tool)
                             self._state_tracker.mark_synced(tool_id, current_hash)
-                            # Cache tool-to-server relationship
-                            server_ids = tool_to_server.get(tool_id, [])
-                            self._state_tracker.cache_tool_servers(tool_id, server_ids)
                         total_synced += len(operations["create"])
                     else:
                         self.logger.warning("Bulk create failed")
@@ -290,14 +249,11 @@ class SyncToolsActivity(AbstractScheduledActivity):
                     job_id = await self._fam_client.bulk_update_tools(operations["update"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk update job submitted: {job_id}")
-                        # Mark all as synced and update server relationships
+                        # Mark all as synced
                         for tool in operations["update"]:
                             tool_id = str(tool.id)
                             current_hash = self._state_tracker.compute_hash(tool)
                             self._state_tracker.mark_synced(tool_id, current_hash)
-                            # Update tool-to-server relationship cache
-                            server_ids = tool_to_server.get(tool_id, [])
-                            self._state_tracker.cache_tool_servers(tool_id, server_ids)
                         total_synced += len(operations["update"])
                     else:
                         self.logger.warning("Bulk update failed")
@@ -312,10 +268,9 @@ class SyncToolsActivity(AbstractScheduledActivity):
                     job_id = await self._fam_client.bulk_delete_tools(operations["delete"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk delete job submitted: {job_id}")
-                        # Mark all as deleted and clear server relationships
+                        # Mark all as deleted
                         for tool_id in operations["delete"]:
                             self._state_tracker.mark_deleted(tool_id)
-                            self._state_tracker.clear_tool_servers(tool_id)
                         total_synced += len(operations["delete"])
                     else:
                         self.logger.warning("Bulk delete failed")
@@ -355,7 +310,6 @@ class SyncToolsActivity(AbstractScheduledActivity):
         """Group tools by server and operation type (create/update/delete).
 
         Handles many-to-many tool-server relationships - each tool is synced to ALL its associated servers.
-        Detects server-level association changes (tool added to/removed from a server).
 
         Args:
             tools: List of Tool ORM objects
@@ -369,59 +323,36 @@ class SyncToolsActivity(AbstractScheduledActivity):
 
         current_tool_ids = {str(tool.id) for tool in tools}
 
-        # Detect deleted tools (tool completely removed from DB)
+        # Detect deleted tools
         deleted_ids = self._state_tracker.get_deleted_tools(current_tool_ids)
-        
         for tool_id in deleted_ids:
-            # Get server IDs from cache (since tool is deleted from DB)
-            server_ids = self._state_tracker.get_cached_tool_servers(tool_id)
-            
-            if not server_ids:
-                self.logger.warning(f"Tool {tool_id} deleted but no cached server associations found")
-                continue
-            
+            server_ids = tool_to_servers.get(tool_id, [])
             # Delete from ALL servers this tool was associated with
             for server_id in server_ids:
                 tools_by_server[server_id]["delete"].append(tool_id)
 
-        # Classify current tools and detect server-level association changes
+        # Classify current tools
         for tool in tools:
             tool_id = str(tool.id)
-            current_server_ids = set(tool_to_servers.get(tool_id, []))
-            cached_server_ids = set(self._state_tracker.get_cached_tool_servers(tool_id))
+            server_ids = tool_to_servers.get(tool_id, [])
 
-            if not current_server_ids:
-                # Tool not associated with any synced server
-                # If it was previously associated, delete from those servers
-                if cached_server_ids:
-                    for server_id in cached_server_ids:
-                        tools_by_server[server_id]["delete"].append(tool_id)
+            if not server_ids:
+                # Tool not associated with any synced server, skip
                 continue
 
             current_hash = self._state_tracker.compute_hash(tool)
+            
+            cached_hash = self._state_tracker.get_cached_hash(tool_id)
+            
             is_new = self._state_tracker.is_new_tool(tool_id)
             has_changed = self._state_tracker.has_changed(tool_id, current_hash)
 
-            # Detect server-level changes
-            added_to_servers = current_server_ids - cached_server_ids  # New associations
-            removed_from_servers = cached_server_ids - current_server_ids  # Removed associations
-            unchanged_servers = current_server_ids & cached_server_ids  # Still associated
-
-            # Handle tool removed from specific servers (but still exists in DB)
-            for server_id in removed_from_servers:
-                tools_by_server[server_id]["delete"].append(tool_id)
-
-            # Handle tool added to new servers
-            for server_id in added_to_servers:
-                tools_by_server[server_id]["create"].append(tool)
-
-            # Handle existing associations
-            for server_id in unchanged_servers:
+            # Sync tool to ALL its associated servers
+            for server_id in server_ids:
                 if is_new:
-                    # Brand new tool (first sync ever)
                     tools_by_server[server_id]["create"].append(tool)
                 elif has_changed:
-                    # Tool properties changed
                     tools_by_server[server_id]["update"].append(tool)
+                else:
 
         return dict(tools_by_server)

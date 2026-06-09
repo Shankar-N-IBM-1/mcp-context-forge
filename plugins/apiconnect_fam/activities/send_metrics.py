@@ -131,62 +131,21 @@ class SendMetricsActivity(AbstractScheduledActivity):
             # Build payload using FAMMetricsPayload builder
             # TEMPORARY DEBUG LOGGING - REMOVE WHEN REQUESTED
             import json
-            print("\n" + "=" * 80)
-            print("SENDING METRICS TO FAM")
-            print("=" * 80)
-            print(f"Current timestamp: {current_time.isoformat()}")
-            print(f"Time window start: {time_window_start.isoformat()}")
-            print(f"Last sent timestamp: {self._last_sent_timestamp.isoformat() if self._last_sent_timestamp else 'None (first run)'}")
-            print(f"Server metrics count: {len(server_metrics_raw)}")
-            print(f"Tool metrics count: {len(tool_metrics_raw)}")
-            print(f"Total metrics to send: {total_metrics}")
             
             payload = FAMMetricsPayload.build_payload(
                 timestamp=current_time, server_metrics_map=dict(server_metrics_map), tool_metrics_by_server={k: dict(v) for k, v in tool_metrics_by_server.items()}
             )
-            
-            # Log full payload for debugging
-            print("\nFull payload being sent to FAM:")
-            try:
-                print(json.dumps(payload, indent=2, default=str))
-            except Exception as e:
-                print(f"Could not serialize full payload: {e}")
-                # Try payload summary instead
-                try:
-                    payload_summary = {
-                        "timestamp": payload.get("timestamp"),
-                        "runtime_metrics_count": len(payload.get("runtime_metrics", [])),
-                        "summary_metrics_count": len(payload.get("summary_metrics", [])),
-                        "servers_with_metrics": list(server_metrics_map.keys()),
-                        "tools_with_metrics": {k: list(v.keys()) for k, v in tool_metrics_by_server.items()}
-                    }
-                    print("Payload summary:")
-                    print(json.dumps(payload_summary, indent=2))
-                except Exception as e2:
-                    print(f"Could not serialize payload summary: {e2}")
-            
-            print("\nCalling FAM API: POST /api/engine/v3/runtimes/.../metrics")
-            # END TEMPORARY DEBUG LOGGING
 
             success = await self._fam_client.submit_metrics(payload)
 
             if success:
                 self._last_sent_timestamp = current_time
-                # TEMPORARY DEBUG LOGGING - REMOVE WHEN REQUESTED
                 if total_metrics > 0:
-                    print(f"✓ FAM API call successful ({total_metrics} new metrics sent)")
                     self.logger.debug(f"FAM API call successful ({total_metrics} metrics sent)")
                 else:
-                    print("✓ FAM API call successful (no new metrics)")
                     self.logger.debug("FAM API call successful (empty metrics payload sent)")
-                print("=" * 80 + "\n")
-                # END TEMPORARY DEBUG LOGGING
                 return total_metrics
             else:
-                # TEMPORARY DEBUG LOGGING - REMOVE WHEN REQUESTED
-                print("✗ FAM API call failed - will retry with same metrics on next interval")
-                print("=" * 80 + "\n")
-                # END TEMPORARY DEBUG LOGGING
                 self.logger.error("FAM API call failed")
                 return 0
 
