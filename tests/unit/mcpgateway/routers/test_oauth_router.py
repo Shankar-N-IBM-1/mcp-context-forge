@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 # First-Party
 from mcpgateway.db import Gateway
-from mcpgateway.routers.oauth_router import enforce_fetch_tools_csrf
+from mcpgateway.routers.oauth_router import ADMIN_CSRF_COOKIE_NAME, enforce_fetch_tools_csrf
 from mcpgateway.schemas import EmailUserResponse
 from mcpgateway.services.oauth_manager import OAuthError
 
@@ -58,7 +58,7 @@ def mock_gateway():
     gateway.oauth_config = {
         "grant_type": "authorization_code",
         "client_id": "test_client",
-        "client_secret": "test_secret",
+        "client_secret": "test_secret",  # pragma: allowlist secret
         "authorization_url": "https://oauth.example.com/authorize",
         "token_url": "https://oauth.example.com/token",
         "redirect_uri": "https://gateway.example.com/oauth/callback",
@@ -192,6 +192,44 @@ class TestEnforceFetchToolsCsrf:
     async def test_referer_parse_exception_raises_403(self, mock_urlparse, csrf_request):
         csrf_request.headers = {"referer": "https://gateway.example.com", "x-csrf-token": "token-123"}
         csrf_request.cookies = {"mcpgateway_csrf_token": "token-123"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await enforce_fetch_tools_csrf(csrf_request)
+
+        assert exc_info.value.status_code == 403
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "http://localhost:4444")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_pass_with_request_origin_when_app_domain_does_not_match(self, csrf_request):
+        """RC1: request_origin allows production Origin when app_domain is the default localhost."""
+        url_mock = Mock()
+        url_mock.scheme = "https"
+        url_mock.netloc = "production.example.com"
+        csrf_request.url = url_mock
+        csrf_request.headers = {
+            "origin": "https://production.example.com",
+            "x-csrf-token": "valid-token",
+        }
+        csrf_request.cookies = {"mcpgateway_csrf_token": "valid-token"}
+
+        assert await enforce_fetch_tools_csrf(csrf_request) is None
+
+    @patch("mcpgateway.routers.oauth_router.settings.app_domain", "https://gateway.example.com")
+    @patch("mcpgateway.routers.oauth_router.settings.csrf_trusted_origins", set())
+    @pytest.mark.asyncio
+    async def test_x_forwarded_host_injection_denied_when_app_domain_configured(self, csrf_request):
+        """Finding 4 deny-path: when app_domain is a real domain, an attacker-controlled
+        request_origin (via X-Forwarded-Host) must NOT widen the allowed set."""
+        url_mock = Mock()
+        url_mock.scheme = "https"
+        url_mock.netloc = "evil.example.com"
+        csrf_request.url = url_mock
+        csrf_request.headers = {
+            "origin": "https://evil.example.com",
+            "x-csrf-token": "valid-token",
+        }
+        csrf_request.cookies = {"mcpgateway_csrf_token": "valid-token"}
 
         with pytest.raises(HTTPException) as exc_info:
             await enforce_fetch_tools_csrf(csrf_request)
@@ -370,7 +408,7 @@ class TestOAuthRouter:
         gateway.oauth_config = {
             "grant_type": "authorization_code",
             "client_id": "test_client",
-            "client_secret": "test_secret",
+            "client_secret": "test_secret",  # pragma: allowlist secret
             "authorization_url": "https://oauth.example.com/authorize",
             "token_url": "https://oauth.example.com/token",
             "redirect_uri": "https://gateway.example.com/oauth/callback",
@@ -1579,6 +1617,7 @@ class TestOAuthRouterAdditionalCoverage:
         class _Registered:
             client_id = "client-123"
             client_secret_encrypted = None
+            token_endpoint_auth_method = "client_secret_post"
 
         class _FakeDcrService:
             async def get_or_register_client(self, **_kwargs):
@@ -1697,6 +1736,7 @@ class TestOAuthRouterAdditionalCoverage:
         class _Registered:
             client_id = "client-123"
             client_secret_encrypted = "encrypted"
+            token_endpoint_auth_method = "client_secret_post"
 
         class _FakeDcrService:
             async def get_or_register_client(self, **_kwargs):
@@ -2148,7 +2188,7 @@ class TestOAuthCallbackCSPCompliance:
         mock_gateway.oauth_config = {
             "grant_type": "authorization_code",
             "client_id": "test-client",
-            "client_secret": "test-secret",
+            "client_secret": "test-secret",  # pragma: allowlist secret
             "authorization_url": "https://oauth.example.com/authorize",
             "token_url": "https://oauth.example.com/token",
             "redirect_uri": "http://localhost:4444/oauth/callback",
@@ -2178,12 +2218,7 @@ class TestOAuthCallbackCSPCompliance:
             with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
                 from mcpgateway.routers.oauth_router import oauth_callback
 
-                result = await oauth_callback(
-                    code="test-auth-code",
-                    state="test-state-token",
-                    request=mock_request,
-                    db=mock_db
-                )
+                result = await oauth_callback(code="test-auth-code", state="test-state-token", request=mock_request, db=mock_db)
 
         # Verify response is HTML
         assert isinstance(result, HTMLResponse)
@@ -2193,20 +2228,130 @@ class TestOAuthCallbackCSPCompliance:
         body = result.body.decode()
 
         # Critical assertion: Verify CSP nonce is present in script tag
-        assert '<script nonce="test-nonce-abc123xyz">' in body, \
-            "OAuth callback page must include CSP nonce in inline script tag"
+        assert '<script nonce="test-nonce-abc123xyz">' in body, "OAuth callback page must include CSP nonce in inline script tag"
 
         # Verify no inline onclick handlers (CSP violation)
-        assert 'onclick=' not in body, \
-            "OAuth callback page must not use inline onclick handlers (CSP violation)"
+        assert "onclick=" not in body, "OAuth callback page must not use inline onclick handlers (CSP violation)"
 
         # Verify addEventListener pattern is used instead
-        assert 'addEventListener' in body, \
-            "OAuth callback page must use addEventListener for CSP compliance"
+        assert "addEventListener" in body, "OAuth callback page must use addEventListener for CSP compliance"
 
         # Verify IIFE wrapper for proper scoping
-        assert '(function()' in body or '(function ()' in body, \
-            "OAuth callback page script should use IIFE for proper scoping"
+        assert "(function()" in body or "(function ()" in body, "OAuth callback page script should use IIFE for proper scoping"
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_sets_csrf_cookie(self, mock_db, mock_request):
+        """Verify OAuth callback response sets mcpgateway_csrf_token cookie."""
+        mock_gateway = Mock(spec=Gateway)
+        mock_gateway.id = "csrf-cookie-test"
+        mock_gateway.name = "CSRF Cookie Test"
+        mock_gateway.url = "https://mcp.example.com"
+        mock_gateway.oauth_config = {
+            "grant_type": "authorization_code",
+            "client_id": "test-client",
+            "client_secret": "test-secret",  # pragma: allowlist secret
+            "authorization_url": "https://oauth.example.com/authorize",
+            "token_url": "https://oauth.example.com/token",
+            "redirect_uri": "http://localhost:4444/oauth/callback",
+        }
+        mock_gateway.ca_certificate = None
+        mock_gateway.client_cert = None
+        mock_gateway.client_key = None
+
+        mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+        mock_request.state.csp_nonce = "test-nonce"
+
+        oauth_result = {
+            "user_id": "user@example.com",
+            "expires_at": "2026-12-31T23:59:59Z",
+            "token_aud": None,
+        }
+
+        with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
+            mock_mgr = Mock()
+            mock_mgr.resolve_gateway_id_from_state = AsyncMock(return_value="csrf-cookie-test")
+            mock_mgr.complete_authorization_code_flow = AsyncMock(return_value=oauth_result)
+            mock_oauth_mgr.return_value = mock_mgr
+
+            with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+                from mcpgateway.routers.oauth_router import oauth_callback
+
+                result = await oauth_callback(
+                    code="test-auth-code",
+                    state="test-state-token",
+                    request=mock_request,
+                    db=mock_db,
+                )
+
+        assert isinstance(result, HTMLResponse)
+        assert result.status_code == 200
+
+        set_cookie = result.headers.get("set-cookie")
+        assert set_cookie is not None, "Response must include Set-Cookie header"
+        assert ADMIN_CSRF_COOKIE_NAME in set_cookie, f"Set-Cookie must contain {ADMIN_CSRF_COOKIE_NAME}"
+
+        cookie_value = None
+        for part in set_cookie.split(";"):
+            part = part.strip()
+            if part.startswith(f"{ADMIN_CSRF_COOKIE_NAME}="):
+                cookie_value = part.split("=", 1)[1]
+                break
+        assert cookie_value is not None, f"Cookie {ADMIN_CSRF_COOKIE_NAME} must have a value"
+        assert len(cookie_value) >= 32, f"CSRF token must be at least 32 chars, got {len(cookie_value)}"
+
+        assert "Secure" not in set_cookie or "HttpOnly" not in set_cookie, "CSRF cookie must NOT be HttpOnly (JS needs to read it)"
+        assert "SameSite=strict" in set_cookie or "SameSite=Strict" in set_cookie, "CSRF cookie must have SameSite=strict"
+
+    @pytest.mark.asyncio
+    async def test_oauth_callback_reuses_existing_csrf_cookie(self, mock_db, mock_request):
+        """Verify OAuth callback reuses existing valid CSRF token instead of generating a new one."""
+        mock_gateway = Mock(spec=Gateway)
+        mock_gateway.id = "csrf-reuse-test"
+        mock_gateway.name = "CSRF Reuse Test"
+        mock_gateway.url = "https://mcp.example.com"
+        mock_gateway.oauth_config = {
+            "grant_type": "authorization_code",
+            "client_id": "test-client",
+            "client_secret": "test-secret",  # pragma: allowlist secret
+            "authorization_url": "https://oauth.example.com/authorize",
+            "token_url": "https://oauth.example.com/token",
+            "redirect_uri": "http://localhost:4444/oauth/callback",
+        }
+        mock_gateway.ca_certificate = None
+        mock_gateway.client_cert = None
+        mock_gateway.client_key = None
+
+        mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+        mock_request.state.csp_nonce = "test-nonce"
+
+        existing_token = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789_"  # pragma: allowlist secret
+
+        with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
+            mock_mgr = Mock()
+            mock_mgr.resolve_gateway_id_from_state = AsyncMock(return_value="csrf-reuse-test")
+            mock_mgr.complete_authorization_code_flow = AsyncMock(
+                return_value={
+                    "user_id": "user@example.com",
+                    "expires_at": "2026-12-31T23:59:59Z",
+                    "token_aud": None,
+                }
+            )
+            mock_oauth_mgr.return_value = mock_mgr
+
+            with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+                from mcpgateway.routers.oauth_router import oauth_callback, ADMIN_CSRF_COOKIE_NAME
+
+                with patch.object(mock_request, "cookies", {ADMIN_CSRF_COOKIE_NAME: existing_token}):
+                    result = await oauth_callback(
+                        code="test-auth-code",
+                        state="test-state-token",
+                        request=mock_request,
+                        db=mock_db,
+                    )
+
+        assert isinstance(result, HTMLResponse)
+        set_cookie = result.headers.get("set-cookie", "")
+        assert existing_token in set_cookie, "Existing valid CSRF token should be reused in Set-Cookie"
 
     @pytest.mark.asyncio
     async def test_oauth_callback_success_handles_missing_csp_nonce_gracefully(self, mock_db, mock_request):
@@ -2235,8 +2380,8 @@ class TestOAuthCallbackCSPCompliance:
 
         # Simulate missing CSP nonce (request.state.csp_nonce not set)
         # This tests the fallback behavior in get_csp_nonce_from_request
-        if hasattr(mock_request.state, 'csp_nonce'):
-            delattr(mock_request.state, 'csp_nonce')
+        if hasattr(mock_request.state, "csp_nonce"):
+            delattr(mock_request.state, "csp_nonce")
 
         with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
             mock_mgr = Mock()
@@ -2247,12 +2392,7 @@ class TestOAuthCallbackCSPCompliance:
             with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
                 from mcpgateway.routers.oauth_router import oauth_callback
 
-                result = await oauth_callback(
-                    code="test-auth-code",
-                    state="test-state-token",
-                    request=mock_request,
-                    db=mock_db
-                )
+                result = await oauth_callback(code="test-auth-code", state="test-state-token", request=mock_request, db=mock_db)
 
         # Verify response is still valid HTML
         assert isinstance(result, HTMLResponse)
@@ -2262,8 +2402,7 @@ class TestOAuthCallbackCSPCompliance:
 
         # When nonce is missing, get_csp_nonce_from_request returns empty string
         # The script tag should still be present but with empty nonce attribute
-        assert '<script nonce="">' in body, \
-            "OAuth callback should handle missing CSP nonce gracefully with empty nonce attribute"
+        assert '<script nonce="">' in body, "OAuth callback should handle missing CSP nonce gracefully with empty nonce attribute"
 
     @pytest.mark.asyncio
     async def test_oauth_callback_error_pages_do_not_include_inline_scripts(self, mock_db, mock_request):
@@ -2271,35 +2410,22 @@ class TestOAuthCallbackCSPCompliance:
         from mcpgateway.routers.oauth_router import oauth_callback
 
         # Test error callback (provider returned error)
-        result = await oauth_callback(
-            code=None,
-            state="test-state",
-            error="access_denied",
-            error_description="User denied access",
-            request=mock_request,
-            db=mock_db
-        )
+        result = await oauth_callback(code=None, state="test-state", error="access_denied", error_description="User denied access", request=mock_request, db=mock_db)
 
         assert isinstance(result, HTMLResponse)
         assert result.status_code == 400
         body = result.body.decode()
 
         # Error pages should not have inline scripts
-        assert '<script' not in body, \
-            "OAuth error pages should not contain inline scripts"
+        assert "<script" not in body, "OAuth error pages should not contain inline scripts"
 
         # Test missing code error
-        result = await oauth_callback(
-            code=None,
-            state="test-state",
-            request=mock_request,
-            db=mock_db
-        )
+        result = await oauth_callback(code=None, state="test-state", request=mock_request, db=mock_db)
 
         assert isinstance(result, HTMLResponse)
         assert result.status_code == 400
         body = result.body.decode()
-        assert '<script' not in body
+        assert "<script" not in body
 
     @pytest.mark.asyncio
     async def test_oauth_callback_csp_nonce_uniqueness_per_request(self, mock_db):
@@ -2351,17 +2477,13 @@ class TestOAuthCallbackCSPCompliance:
                 with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
                     from mcpgateway.routers.oauth_router import oauth_callback
 
-                    result = await oauth_callback(
-                        code="test-auth-code",
-                        state="test-state-token",
-                        request=mock_request,
-                        db=mock_db
-                    )
+                    result = await oauth_callback(code="test-auth-code", state="test-state-token", request=mock_request, db=mock_db)
 
             body = result.body.decode()
 
             # Extract nonce from script tag
             import re
+
             nonce_match = re.search(r'<script nonce="([^"]+)">', body)
             assert nonce_match, f"Request {i}: CSP nonce not found in script tag"
 
