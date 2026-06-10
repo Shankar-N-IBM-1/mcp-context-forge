@@ -258,11 +258,12 @@ class SyncToolsActivity(AbstractScheduledActivity):
                     job_id = await self._fam_client.bulk_create_tools(operations["create"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk create job submitted: {job_id}")
-                        # Mark all as synced and cache server relationships
+                        # Mark all as synced using composite key: server_id_tool_id
                         for tool in operations["create"]:
                             tool_id = str(tool.id)
+                            composite_key = f"{server_id}_{tool_id}"
                             current_hash = self._state_tracker.compute_hash(tool)
-                            self._state_tracker.mark_synced(tool_id, current_hash)
+                            self._state_tracker.mark_synced(composite_key, current_hash)
                             # Cache tool-to-server relationship
                             server_ids = tool_to_server.get(tool_id, [])
                             self._state_tracker.cache_tool_servers(tool_id, server_ids)
@@ -294,7 +295,8 @@ class SyncToolsActivity(AbstractScheduledActivity):
                         for tool in operations["update"]:
                             tool_id = str(tool.id)
                             current_hash = self._state_tracker.compute_hash(tool)
-                            self._state_tracker.mark_synced(tool_id, current_hash)
+                            composite_key = f"{server_id}_{tool_id}"
+                            self._state_tracker.mark_synced(composite_key, current_hash)
                             # Update tool-to-server relationship cache
                             server_ids = tool_to_server.get(tool_id, [])
                             self._state_tracker.cache_tool_servers(tool_id, server_ids)
@@ -312,10 +314,10 @@ class SyncToolsActivity(AbstractScheduledActivity):
                     job_id = await self._fam_client.bulk_delete_tools(operations["delete"], server_id)
                     if job_id:
                         self.logger.debug(f"Bulk delete job submitted: {job_id}")
-                        # Mark all as deleted and clear server relationships
+                        # Mark as deleted using composite key (per-server tracking)
                         for tool_id in operations["delete"]:
-                            self._state_tracker.mark_deleted(tool_id)
-                            self._state_tracker.clear_tool_servers(tool_id)
+                            composite_key = f"{server_id}_{tool_id}"
+                            self._state_tracker.mark_deleted(composite_key)
                         total_synced += len(operations["delete"])
                     else:
                         self.logger.warning("Bulk delete failed")
@@ -399,8 +401,6 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 continue
 
             current_hash = self._state_tracker.compute_hash(tool)
-            is_new = self._state_tracker.is_new_tool(tool_id)
-            has_changed = self._state_tracker.has_changed(tool_id, current_hash)
 
             # Detect server-level changes
             added_to_servers = current_server_ids - cached_server_ids  # New associations
@@ -415,13 +415,17 @@ class SyncToolsActivity(AbstractScheduledActivity):
             for server_id in added_to_servers:
                 tools_by_server[server_id]["create"].append(tool)
 
-            # Handle existing associations
+            # Handle existing associations - check per-server state
             for server_id in unchanged_servers:
+                composite_key = f"{server_id}_{tool_id}"
+                is_new = self._state_tracker.is_new_tool(composite_key)
+                has_changed = self._state_tracker.has_changed(composite_key, current_hash)
+                
                 if is_new:
-                    # Brand new tool (first sync ever)
+                    # Brand new tool for this server (first sync to this server)
                     tools_by_server[server_id]["create"].append(tool)
                 elif has_changed:
-                    # Tool properties changed
+                    # Tool properties changed for this server
                     tools_by_server[server_id]["update"].append(tool)
 
         return dict(tools_by_server)
