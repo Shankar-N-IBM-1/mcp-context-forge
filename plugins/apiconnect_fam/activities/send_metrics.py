@@ -173,19 +173,20 @@ class SendMetricsActivity(AbstractScheduledActivity):
         Returns:
             Dictionary mapping server ID to tool metrics
         """
-        # Build tool-to-server mapping
-        tool_to_server = {}
+        # Build tool-to-servers mapping (many-to-many)
+        tool_to_servers = defaultdict(list)
         for server in servers:
             if hasattr(server, "tools") and server.tools:
                 for tool in server.tools:
-                    tool_to_server[str(tool.id)] = str(server.id)
+                    tool_to_servers[str(tool.id)].append(str(server.id))
 
         # Organize by server and tool
+        # Each tool metric is duplicated for each server the tool is associated with
         tool_metrics_by_server = defaultdict(lambda: defaultdict(list))
         for metric in metrics:
             tool_id = str(metric.tool_id)
-            server_id = tool_to_server.get(tool_id)
-            if server_id:
+            server_ids = tool_to_servers.get(tool_id, [])
+            for server_id in server_ids:
                 tool_metrics_by_server[server_id][tool_id].append(metric)
 
         return tool_metrics_by_server

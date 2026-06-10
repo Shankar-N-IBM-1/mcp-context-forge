@@ -155,6 +155,17 @@ class ActivityOrchestrator:
         self._registered_servers.add(server_id)
         logger.debug(f"Server {server_id} marked as synced to FAM")
 
+    def unmark_server_synced(self, server_id: str) -> None:
+        """Unmark a server as synced to FAM.
+
+        Called by server sync activity when a server is deleted from FAM.
+
+        Args:
+            server_id: ContextForge server ID
+        """
+        self._registered_servers.discard(server_id)
+        logger.debug(f"Server {server_id} unmarked as synced to FAM")
+
     def is_server_registered(self, server_id: str) -> bool:
         """Check if a server has been registered to FAM.
 
@@ -260,6 +271,9 @@ class ActivityOrchestrator:
 
     async def stop(self) -> None:
         """Stop the orchestrator and cancel all activity tasks."""
+        # Debug: Track orchestrator stop
+        print(f"[DEBUG] ActivityOrchestrator stop called at {id(self)}")
+        
         if not self._running and not self._activity_tasks:
             logger.warning("ActivityOrchestrator not running and no tasks to cancel")
             return

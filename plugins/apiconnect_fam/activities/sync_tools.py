@@ -169,6 +169,9 @@ class SyncToolsActivity(AbstractScheduledActivity):
         self._orchestrator = orchestrator
         self._state_tracker = ToolStateTracker()
         self._total_tools_synced = 0
+        
+        # Debug: Track initialization
+        print(f"[DEBUG] SyncToolsActivity initialized at {id(self)}, state_tracker at {id(self._state_tracker)}")
 
     def get_interval_seconds(self) -> int:
         """Get the sync interval.
@@ -429,13 +432,14 @@ class SyncToolsActivity(AbstractScheduledActivity):
             # Handle existing associations - check per-server state
             for server_id in unchanged_servers:
                 composite_key = f"{server_id}_{tool_id}"
-                is_new = self._state_tracker.is_new_tool(composite_key)
+                
+                # Skip if not in cache (already processed in added_to_servers or never synced)
+                if not self._state_tracker.get_cached_hash(composite_key):
+                    continue
+                
                 has_changed = self._state_tracker.has_changed(composite_key, current_hash)
                 
-                if is_new:
-                    # Brand new tool for this server (first sync to this server)
-                    tools_by_server[server_id]["create"].append(tool)
-                elif has_changed:
+                if has_changed:
                     # Tool properties changed for this server
                     tools_by_server[server_id]["update"].append(tool)
 

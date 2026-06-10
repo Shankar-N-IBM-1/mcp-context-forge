@@ -790,7 +790,7 @@ class FAMAssetCatalogClient:
 
         async def _do_bulk_update() -> Optional[str]:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/update"
-            payloads = [FAMToolPayload.build_update_payload(tool) for tool in tools]
+            payloads = [FAMToolPayload.build_update_payload(tool, server_id) for tool in tools]
             
             print("\n" + "=" * 80)
             print("FAM API: BULK UPDATE TOOLS")

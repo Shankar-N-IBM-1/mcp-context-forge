@@ -73,22 +73,34 @@ class AbstractStateTracker(ABC):
             True if entity has changed or is new
         """
         cached_hash = self._cache.get(entity_id)
-        return cached_hash != current_hash
+        has_changed = cached_hash != current_hash
+        
+        # Debug logging
+        if has_changed and cached_hash is not None:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"[HASH MISMATCH] Entity {entity_id}")
+            logger.debug(f"  Cached hash: {cached_hash}")
+            logger.debug(f"  Current hash: {current_hash}")
+        
+        return has_changed
 
-    def mark_synced(self, entity_id: str, content_hash: str) -> None:
+    def mark_synced(self, entity_id: str, content_hash: str, metadata: Dict[str, Any] | None = None) -> None:
         """Mark entity as synced to FAM.
 
         Args:
             entity_id: Entity identifier
             content_hash: Content hash of synced state
+            metadata: Optional metadata to cache (e.g., relationships)
         """
         self._cache[entity_id] = content_hash
 
-    def mark_deleted(self, entity_id: str) -> None:
+    def mark_deleted(self, entity_id: str, metadata: Dict[str, Any] | None = None) -> None:
         """Mark entity as deleted from FAM.
 
         Args:
             entity_id: Entity identifier
+            metadata: Optional metadata (unused in base class, for subclass extension)
         """
         self._cache.pop(entity_id, None)
 

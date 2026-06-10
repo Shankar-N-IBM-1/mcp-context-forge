@@ -141,8 +141,22 @@ class APIConnectFAMPlugin(Plugin):
         self._orchestrator: Optional[ActivityOrchestrator] = None
         self._runtime_id: Optional[str] = None
 
+    def _is_primary_worker(self) -> bool:
+        """Check if this is the primary worker (same logic as orchestrator)."""
+        worker_id = os.environ.get("GUNICORN_WORKER_ID")
+        if worker_id is None:
+            return True
+        try:
+            return int(worker_id) == 1
+        except (ValueError, TypeError):
+            return False
+
     async def initialize(self) -> None:
         """Start the activity orchestrator and HTTP client."""
+        # Debug: Track plugin initialization (primary worker only)
+        if self._is_primary_worker():
+            print(f"[DEBUG] APIConnectFAMPlugin initialized at {id(self)} (primary worker)")
+        
         logger.info(f"Initializing APIConnectFAMPlugin with interval={self._cfg.interval_seconds}s")
 
         # Initialize IBM API Connect Federated API Management client if sync is enabled
@@ -232,6 +246,10 @@ class APIConnectFAMPlugin(Plugin):
     async def shutdown(self) -> None:
         """Stop the activity orchestrator and close HTTP client."""
         logger.info("Shutting down APIConnectFAMPlugin")
+        
+        # Debug: Track plugin shutdown (primary worker only)
+        if self._is_primary_worker():
+            print(f"[DEBUG] APIConnectFAMPlugin shutdown called at {id(self)} (primary worker)")
 
         # Stop orchestrator
         if self._orchestrator:

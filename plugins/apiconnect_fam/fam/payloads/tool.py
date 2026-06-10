@@ -240,7 +240,7 @@ class FAMToolPayload:
         """Build MCPToolCreate payload for POST request.
 
         Required fields: mcpServerId, name, inputSchema
-        Optional fields: mcpToolId, description, requestType, outputSchema, annotations, tags, owner
+        Optional fields: id, mcpToolId, description, requestType, outputSchema, annotations, tags, owner
 
         Includes all properties that FAM uses for change detection to ensure accurate sync.
 
@@ -264,6 +264,11 @@ class FAMToolPayload:
             "name": cls._truncate_string(tool.original_name or tool.custom_name, 255),
             "inputSchema": input_schema,
         }
+
+        # Composite ID in format {server_id}_{tool_id} for unique identification across servers
+        if hasattr(tool, "id") and tool.id:
+            composite_id = f"{server_id}_{tool.id}"
+            payload["id"] = cls._truncate_string(composite_id, 255)
 
         # Optional mcpToolId (critical for updates)
         if hasattr(tool, "id") and tool.id:
@@ -296,20 +301,10 @@ class FAMToolPayload:
         if hasattr(tool, "enabled"):
             payload["enabled"] = bool(tool.enabled)
 
-        print("\n" + "=" * 80)
-        print("FAM PAYLOAD: CREATE TOOL")
-        print("=" * 80)
-        print(f"Tool Name: {tool.original_name or tool.custom_name}")
-        print(f"Tool ID: {getattr(tool, 'id', 'N/A')}")
-        print(f"Server ID: {server_id}")
-        print(f"\nPayload:")
-        print(json.dumps(payload, indent=2, default=str))
-        print("=" * 80 + "\n")
-
         return payload
 
     @classmethod
-    def build_update_payload(cls, tool: Any) -> Dict[str, Any]:
+    def build_update_payload(cls, tool: Any, server_id: str) -> Dict[str, Any]:
         """Build MCPToolUpdate payload for PUT request.
 
         mcpToolId is mandatory for bulk update operations.
@@ -319,14 +314,18 @@ class FAMToolPayload:
 
         Args:
             tool: ContextForge Tool ORM object
+            server_id: Parent MCP Server ID (for composite id)
 
         Returns:
             Dictionary matching MCPToolUpdate schema
         """
-        import json
-        
         payload: Dict[str, Any] = {}
         
+        # Composite ID in format {server_id}_{tool_id} for unique identification across servers
+        if hasattr(tool, "id") and tool.id:
+            composite_id = f"{server_id}_{tool.id}"
+            payload["id"] = cls._truncate_string(composite_id, 255)
+
         # Mandatory mcpToolId for bulk update
         if hasattr(tool, "id") and tool.id:
             payload["mcpToolId"] = cls._truncate_string(str(tool.id), 255)
@@ -367,14 +366,5 @@ class FAMToolPayload:
         # Optional enabled flag (include for visibility control)
         if hasattr(tool, "enabled"):
             payload["enabled"] = bool(tool.enabled)
-
-        print("\n" + "=" * 80)
-        print("FAM PAYLOAD: UPDATE TOOL")
-        print("=" * 80)
-        print(f"Tool Name: {tool.original_name or tool.custom_name}")
-        print(f"Tool ID: {getattr(tool, 'id', 'N/A')}")
-        print(f"\nPayload:")
-        print(json.dumps(payload, indent=2, default=str))
-        print("=" * 80 + "\n")
 
         return payload

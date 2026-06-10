@@ -169,6 +169,9 @@ class SyncServersActivity(AbstractScheduledActivity):
             
             # Delete servers from FAM
             for server_id in deleted_server_ids:
+                # Skip if not in cache (already deleted or never synced)
+                if not self._state_tracker.get_cached_hash(server_id):
+                    continue
                 try:
                     self.logger.debug(f"Server {server_id} deleted from DB, deleting from FAM...")
                     success = await self._fam_client.delete_server(server_id)
