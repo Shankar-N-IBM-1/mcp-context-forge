@@ -62,12 +62,13 @@ class AbstractStateTracker(ABC):
         """
         return entity_id not in self._cache
 
-    def has_changed(self, entity_id: str, current_hash: str) -> bool:
+    def has_changed(self, entity_id: str, current_hash: str, entity_data: dict | None = None) -> bool:
         """Check if entity content has changed since last sync.
 
         Args:
             entity_id: Entity identifier
             current_hash: Current content hash
+            entity_data: Optional entity data dict for debugging
 
         Returns:
             True if entity has changed or is new
@@ -75,13 +76,15 @@ class AbstractStateTracker(ABC):
         cached_hash = self._cache.get(entity_id)
         has_changed = cached_hash != current_hash
         
-        # Debug logging
+        # Debug: Print hash mismatch details
         if has_changed and cached_hash is not None:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.debug(f"[HASH MISMATCH] Entity {entity_id}")
-            logger.debug(f"  Cached hash: {cached_hash}")
-            logger.debug(f"  Current hash: {current_hash}")
+            print(f"\n[HASH MISMATCH] Entity {entity_id}")
+            print(f"  Cached hash: {cached_hash}")
+            print(f"  Current hash: {current_hash}")
+            if entity_data:
+                import json
+                print(f"  Entity data: {json.dumps(entity_data, indent=2, default=str)}")
+            print()
         
         return has_changed
 

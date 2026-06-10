@@ -84,6 +84,27 @@ class ToolStateTracker(AbstractStateTracker):
             "annotations": json.dumps(entity.annotations, sort_keys=True) if entity.annotations else "",
         }
         return AbstractStateTracker._compute_hash_from_dict(tool_data)
+    
+    @staticmethod
+    def get_tool_data(entity: Any) -> dict:
+        """Get tool data dict for debugging.
+
+        Args:
+            entity: ContextForge Tool ORM object
+
+        Returns:
+            Tool data dictionary
+        """
+        return {
+            "name": entity.original_name or entity.custom_name,
+            "description": entity.description or entity.original_description,
+            "enabled": entity.enabled,
+            "tags": sorted(entity.tags) if entity.tags else [],
+            "request_type": entity.request_type,
+            "input_schema": json.dumps(entity.input_schema, sort_keys=True) if entity.input_schema else "",
+            "output_schema": json.dumps(entity.output_schema, sort_keys=True) if entity.output_schema else "",
+            "annotations": json.dumps(entity.annotations, sort_keys=True) if entity.annotations else "",
+        }
 
     def is_new_tool(self, tool_id: str) -> bool:
         """Check if tool is new (not yet synced to FAM).
@@ -276,12 +297,16 @@ class SyncToolsActivity(AbstractScheduledActivity):
 
                 # Bulk update changed tools
                 if operations["update"]:
-                    self.logger.debug(f"{len(operations['update'])} CHANGED tools to update")
+                    # Extract tools from (tool, hash) tuples
+                    tools_with_hashes = operations["update"]
+                    tools_only = [tool for tool, _ in tools_with_hashes]
+                    
+                    self.logger.debug(f"{len(tools_only)} CHANGED tools to update")
                     self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/update")
                     
-                    tool_names = [tool.original_name or tool.custom_name for tool in operations["update"]]
+                    tool_names = [tool.original_name or tool.custom_name for tool, _ in tools_with_hashes]
                     self.logger.debug(f"Updating tools: {tool_names}")
-                    for tool in operations["update"]:
+                    for tool, _ in tools_with_hashes:
                         tool_data = {
                             "name": tool.original_name or tool.custom_name,
                             "description": tool.description or tool.original_description,
@@ -291,19 +316,18 @@ class SyncToolsActivity(AbstractScheduledActivity):
                         }
                         self.logger.debug(f"Tool data: {tool_data}")
                     
-                    job_id = await self._fam_client.bulk_update_tools(operations["update"], server_id)
+                    job_id = await self._fam_client.bulk_update_tools(tools_only, server_id)
                     if job_id:
                         self.logger.debug(f"Bulk update job submitted: {job_id}")
-                        # Mark all as synced and update server relationships
-                        for tool in operations["update"]:
+                        # Mark all as synced using the pre-computed hashes
+                        for tool, tool_hash in tools_with_hashes:
                             tool_id = str(tool.id)
-                            current_hash = self._state_tracker.compute_hash(tool)
                             composite_key = f"{server_id}_{tool_id}"
-                            self._state_tracker.mark_synced(composite_key, current_hash)
+                            self._state_tracker.mark_synced(composite_key, tool_hash)
                             # Update tool-to-server relationship cache
                             server_ids = tool_to_server.get(tool_id, [])
                             self._state_tracker.cache_tool_servers(tool_id, server_ids)
-                        total_synced += len(operations["update"])
+                        total_synced += len(tools_only)
                     else:
                         self.logger.warning("Bulk update failed")
 
@@ -437,10 +461,13 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 if not self._state_tracker.get_cached_hash(composite_key):
                     continue
                 
-                has_changed = self._state_tracker.has_changed(composite_key, current_hash)
+                # Get tool data for debugging
+                tool_data = ToolStateTracker.get_tool_data(tool)
+                has_changed = self._state_tracker.has_changed(composite_key, current_hash, tool_data)
                 
                 if has_changed:
                     # Tool properties changed for this server
-                    tools_by_server[server_id]["update"].append(tool)
+                    # Store tool with its hash for later use in mark_synced
+                    tools_by_server[server_id]["update"].append((tool, current_hash))
 
         return dict(tools_by_server)
