@@ -371,20 +371,31 @@ class SyncToolsActivity(AbstractScheduledActivity):
 
         current_tool_ids = {str(tool.id) for tool in tools}
 
-        # Detect deleted tools (tool completely removed from DB)
-        deleted_ids = self._state_tracker.get_deleted_tools(current_tool_ids)
+        # Build set of current composite keys (server_id_tool_id) for all current tool-server combinations
+        current_composite_keys = set()
+        for tool in tools:
+            tool_id = str(tool.id)
+            server_ids = tool_to_servers.get(tool_id, [])
+            for server_id in server_ids:
+                current_composite_keys.add(f"{server_id}_{tool_id}")
+
+        # Detect deleted composite keys (tool-server combinations that no longer exist)
+        # Only delete if the composite key is in cache (was previously synced)
+        deleted_composite_keys = self._state_tracker.get_deleted_entities(current_composite_keys)
         
-        for tool_id in deleted_ids:
-            # Get server IDs from cache (since tool is deleted from DB)
-            server_ids = self._state_tracker.get_cached_tool_servers(tool_id)
-            
-            if not server_ids:
-                self.logger.warning(f"Tool {tool_id} deleted but no cached server associations found")
+        for composite_key in deleted_composite_keys:
+            # Skip if not in cache (already deleted or never synced)
+            if not self._state_tracker.get_cached_hash(composite_key):
+                continue
+                
+            # Parse composite key to get server_id and tool_id
+            parts = composite_key.split("_", 1)
+            if len(parts) != 2:
+                self.logger.warning(f"Invalid composite key format: {composite_key}")
                 continue
             
-            # Delete from ALL servers this tool was associated with
-            for server_id in server_ids:
-                tools_by_server[server_id]["delete"].append(tool_id)
+            server_id, tool_id = parts
+            tools_by_server[server_id]["delete"].append(tool_id)
 
         # Classify current tools and detect server-level association changes
         for tool in tools:
