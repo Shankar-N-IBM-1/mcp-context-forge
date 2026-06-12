@@ -264,12 +264,16 @@ class SyncToolsActivity(AbstractScheduledActivity):
 
                 # Bulk create new tools
                 if operations["create"]:
-                    self.logger.debug(f"{len(operations['create'])} NEW tools to create")
+                    # Extract tools from (tool, hash) tuples
+                    tools_with_hashes = operations["create"]
+                    tools_only = [tool for tool, _ in tools_with_hashes]
+                    
+                    self.logger.debug(f"{len(tools_only)} NEW tools to create")
                     self.logger.debug(f"Calling FAM API: POST /api/assetcatalog/v1/runtimes/.../mcp-servers/{server_id}/mcp-tools/bulk/create")
                     
-                    tool_names = [tool.original_name or tool.custom_name for tool in operations["create"]]
+                    tool_names = [tool.original_name or tool.custom_name for tool, _ in tools_with_hashes]
                     self.logger.debug(f"Creating tools: {tool_names}")
-                    for tool in operations["create"]:
+                    for tool, _ in tools_with_hashes:
                         tool_data = {
                             "name": tool.original_name or tool.custom_name,
                             "description": tool.description or tool.original_description,
@@ -279,19 +283,18 @@ class SyncToolsActivity(AbstractScheduledActivity):
                         }
                         self.logger.debug(f"Tool data: {tool_data}")
                     
-                    job_id = await self._fam_client.bulk_create_tools(operations["create"], server_id)
+                    job_id = await self._fam_client.bulk_create_tools(tools_only, server_id)
                     if job_id:
                         self.logger.debug(f"Bulk create job submitted: {job_id}")
-                        # Mark all as synced using composite key: server_id_tool_id
-                        for tool in operations["create"]:
+                        # Mark all as synced using the pre-computed hashes
+                        for tool, tool_hash in tools_with_hashes:
                             tool_id = str(tool.id)
                             composite_key = f"{server_id}_{tool_id}"
-                            current_hash = self._state_tracker.compute_hash(tool)
-                            self._state_tracker.mark_synced(composite_key, current_hash)
+                            self._state_tracker.mark_synced(composite_key, tool_hash)
                             # Cache tool-to-server relationship
                             server_ids = tool_to_server.get(tool_id, [])
                             self._state_tracker.cache_tool_servers(tool_id, server_ids)
-                        total_synced += len(operations["create"])
+                        total_synced += len(tools_only)
                     else:
                         self.logger.warning("Bulk create failed")
 
@@ -342,9 +345,19 @@ class SyncToolsActivity(AbstractScheduledActivity):
                     if job_id:
                         self.logger.debug(f"Bulk delete job submitted: {job_id}")
                         # Mark as deleted using composite key (per-server tracking)
-                        for tool_id in operations["delete"]:
-                            composite_key = f"{server_id}_{tool_id}"
+                        # operations["delete"] already contains composite keys
+                        for composite_key in operations["delete"]:
                             self._state_tracker.mark_deleted(composite_key)
+                            
+                            # CRITICAL: Update tool-to-server relationship cache
+                            # Parse composite key to get tool_id
+                            parts = composite_key.split("_", 1)
+                            if len(parts) == 2:
+                                _, tool_id = parts
+                                # Get current server associations from DB
+                                current_server_ids = tool_to_server.get(tool_id, [])
+                                # Update the cached relationship to match current DB state
+                                self._state_tracker.cache_tool_servers(tool_id, current_server_ids)
                         total_synced += len(operations["delete"])
                     else:
                         self.logger.warning("Bulk delete failed")
@@ -410,11 +423,10 @@ class SyncToolsActivity(AbstractScheduledActivity):
         # Only delete if the composite key is in cache (was previously synced)
         deleted_composite_keys = self._state_tracker.get_deleted_entities(current_composite_keys)
         
+        # Track which tools were already handled by get_deleted_entities
+        deleted_tool_ids = set()
+        
         for composite_key in deleted_composite_keys:
-            # Skip if not in cache (already deleted or never synced)
-            if not self._state_tracker.get_cached_hash(composite_key):
-                continue
-                
             # Parse composite key to get server_id and tool_id
             parts = composite_key.split("_", 1)
             if len(parts) != 2:
@@ -422,11 +434,19 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 continue
             
             server_id, tool_id = parts
-            tools_by_server[server_id]["delete"].append(tool_id)
+            deleted_tool_ids.add(tool_id)  # Track this tool as already handled
+            # Use composite ID format for delete operations
+            tools_by_server[server_id]["delete"].append(composite_key)
 
         # Classify current tools and detect server-level association changes
         for tool in tools:
             tool_id = str(tool.id)
+            
+            # Skip if this tool was already handled by get_deleted_entities
+            # This prevents duplicate entries in the delete list
+            if tool_id in deleted_tool_ids:
+                continue
+            
             current_server_ids = set(tool_to_servers.get(tool_id, []))
             cached_server_ids = set(self._state_tracker.get_cached_tool_servers(tool_id))
 
@@ -435,7 +455,8 @@ class SyncToolsActivity(AbstractScheduledActivity):
                 # If it was previously associated, delete from those servers
                 if cached_server_ids:
                     for server_id in cached_server_ids:
-                        tools_by_server[server_id]["delete"].append(tool_id)
+                        composite_key = f"{server_id}_{tool_id}"
+                        tools_by_server[server_id]["delete"].append(composite_key)
                 continue
 
             current_hash = self._state_tracker.compute_hash(tool)
@@ -447,11 +468,13 @@ class SyncToolsActivity(AbstractScheduledActivity):
 
             # Handle tool removed from specific servers (but still exists in DB)
             for server_id in removed_from_servers:
-                tools_by_server[server_id]["delete"].append(tool_id)
+                composite_key = f"{server_id}_{tool_id}"
+                tools_by_server[server_id]["delete"].append(composite_key)
 
             # Handle tool added to new servers
             for server_id in added_to_servers:
-                tools_by_server[server_id]["create"].append(tool)
+                # Store tool with its hash for later use in mark_synced
+                tools_by_server[server_id]["create"].append((tool, current_hash))
 
             # Handle existing associations - check per-server state
             for server_id in unchanged_servers:

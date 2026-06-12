@@ -827,7 +827,7 @@ class FAMAssetCatalogClient:
         POST /api/assetcatalog/v1/runtimes/{runtimeId}/mcp-servers/{mcpServerId}/mcp-tools/bulk/delete
 
         Args:
-            tool_ids: List of tool identifiers
+            tool_ids: List of tool identifiers (composite IDs in format "server_id_tool_id")
             server_id: Parent MCP Server ID
 
         Returns:
