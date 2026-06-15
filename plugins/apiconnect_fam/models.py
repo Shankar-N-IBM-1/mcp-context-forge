@@ -1,10 +1,44 @@
 """Location: ./plugins/apiconnect_fam/models.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Shankar N
 
-Data Models for Server Monitor Plugin.
-Defines core data models used throughout the plugin.
+Data Models for IBM API Connect FAM Plugin.
+
+Defines core data models and configuration structures used throughout the plugin.
+All models use Pydantic for validation and serialization.
+
+Models:
+    - TLSConfig: TLS/SSL configuration for secure HTTPS connections
+    - ActivityStatus: Enumeration of activity execution states
+    - HeartbeatStatus: Enumeration of runtime heartbeat states
+    - ReregistrationReport: Report from FAM on runtime registration
+    - ActivityContext: Shared context for all activities
+    - InactiveHeartbeat: Model for missed heartbeat recovery
+
+Constants:
+    - RUNTIME_TYPE: Fixed runtime type identifier for ContextForge
+
+Usage:
+    ```python
+    # Create TLS configuration
+    tls_config = TLSConfig(
+        truststore_path="/path/to/truststore.pem",
+        truststore_type="PEM"
+    )
+    
+    # Create activity context
+    context = ActivityContext(
+        runtime_id="my-runtime",
+        fam_base_url="https://fam.example.com",
+        config={"key": "value"}
+    )
+    ```
+
+Notes:
+    - All models are immutable by default (Pydantic frozen=False)
+    - TLS configuration supports JKS, PKCS12, and PEM formats
+    - Runtime type is hardcoded to 'MCP_CONTEXT_FORGE'
 """
 
 # Standard

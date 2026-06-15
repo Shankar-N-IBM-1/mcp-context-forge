@@ -1,10 +1,77 @@
 """Location: ./plugins/apiconnect_fam/utils/retry.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Shankar N
 
 Retry Logic with Exponential Backoff.
-Provides retry mechanisms for handling transient failures.
+
+Provides robust retry mechanisms for handling transient failures in
+distributed systems. Includes exponential backoff with jitter and
+circuit breaker pattern for fault tolerance.
+
+Components:
+    - RetryConfig: Configuration model for retry behavior
+    - exponential_backoff: Calculate delay with exponential backoff
+    - with_retry: Async wrapper for retry logic
+    - CircuitBreaker: Circuit breaker pattern implementation
+
+Features:
+    - Exponential backoff with configurable base and max delay
+    - Random jitter to prevent thundering herd
+    - Support for both sync and async functions
+    - Configurable retry attempts and delays
+    - Circuit breaker for cascading failure prevention
+
+Example:
+    ```python
+    # Basic retry with defaults
+    result = await with_retry(
+        api_call,
+        arg1, arg2,
+        operation_name="API Call"
+    )
+    
+    # Custom retry configuration
+    config = RetryConfig(
+        max_attempts=5,
+        initial_delay=2.0,
+        max_delay=120.0,
+        exponential_base=2.0,
+        jitter=0.2
+    )
+    result = await with_retry(
+        api_call,
+        retry_config=config,
+        operation_name="Critical Operation"
+    )
+    
+    # Circuit breaker usage
+    breaker = CircuitBreaker(
+        failure_threshold=5,
+        recovery_timeout=60.0,
+        success_threshold=2
+    )
+    result = await breaker.call(api_function, arg1, arg2)
+    ```
+
+Retry Strategy:
+    1. Initial attempt with no delay
+    2. On failure, calculate exponential backoff delay
+    3. Add random jitter to delay
+    4. Sleep for calculated delay
+    5. Retry operation
+    6. Repeat until success or max attempts reached
+
+Backoff Formula:
+    delay = min(initial_delay * (base ^ attempt), max_delay)
+    delay += random(-jitter * delay, +jitter * delay)
+
+Notes:
+    - Jitter prevents synchronized retries (thundering herd)
+    - Circuit breaker opens after threshold failures
+    - Supports both sync and async functions
+    - All delays are in seconds
+    - Minimum delay is 0.1 seconds
 """
 
 # Standard

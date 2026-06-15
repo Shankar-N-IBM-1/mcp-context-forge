@@ -746,16 +746,6 @@ class FAMAssetCatalogClient:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/create"
             payloads = [FAMToolPayload.build_create_payload(tool, server_id) for tool in tools]
             
-            print("\n" + "=" * 80)
-            print("FAM API: BULK CREATE TOOLS")
-            print("=" * 80)
-            print(f"URL: {url}")
-            print(f"Server ID: {server_id}")
-            print(f"Number of tools: {len(tools)}")
-            print(f"\nRequest Body:")
-            print(json.dumps(payloads, indent=2, default=str))
-            print("=" * 80 + "\n")
-            
             logger.debug(f"FAM API Request URL: {url}")
             logger.debug(f"FAM API Request Body (bulk create): {json.dumps(payloads, indent=2, default=str)}")
             
@@ -765,11 +755,9 @@ class FAMAssetCatalogClient:
             if response.status_code == 202:
                 job_data = response.json()
                 job_id = job_data.get("jobId")
-                print(f"✓ Bulk create job submitted: {job_id}\n")
                 logger.info(f"Bulk create job submitted for {len(tools)} tools (server: {server_id}, job: {job_id})")
                 return job_id
             else:
-                print(f"✗ Unexpected status code: {response.status_code}\n")
                 logger.warning(f"Unexpected status code {response.status_code} for bulk create")
                 return None
 
@@ -792,16 +780,6 @@ class FAMAssetCatalogClient:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/update"
             payloads = [FAMToolPayload.build_update_payload(tool, server_id) for tool in tools]
             
-            print("\n" + "=" * 80)
-            print("FAM API: BULK UPDATE TOOLS")
-            print("=" * 80)
-            print(f"URL: {url}")
-            print(f"Server ID: {server_id}")
-            print(f"Number of tools: {len(tools)}")
-            print(f"\nRequest Body:")
-            print(json.dumps(payloads, indent=2, default=str))
-            print("=" * 80 + "\n")
-            
             logger.debug(f"FAM API Request URL: {url}")
             logger.debug(f"FAM API Request Body (bulk update): {json.dumps(payloads, indent=2, default=str)}")
             
@@ -811,11 +789,9 @@ class FAMAssetCatalogClient:
             if response.status_code == 202:
                 job_data = response.json()
                 job_id = job_data.get("jobId")
-                print(f"✓ Bulk update job submitted: {job_id}\n")
                 logger.info(f"Bulk update job submitted for {len(tools)} tools (server: {server_id}, job: {job_id})")
                 return job_id
             else:
-                print(f"✗ Unexpected status code: {response.status_code}\n")
                 logger.warning(f"Unexpected status code {response.status_code} for bulk update")
                 return None
 
@@ -837,16 +813,6 @@ class FAMAssetCatalogClient:
         async def _do_bulk_delete() -> Optional[str]:
             url = f"{self._endpoint}/{server_id}/mcp-tools/bulk/delete"
             
-            print("\n" + "=" * 80)
-            print("FAM API: BULK DELETE TOOLS")
-            print("=" * 80)
-            print(f"URL: {url}")
-            print(f"Server ID: {server_id}")
-            print(f"Number of tools: {len(tool_ids)}")
-            print(f"\nRequest Body (Tool IDs):")
-            print(json.dumps(tool_ids, indent=2, default=str))
-            print("=" * 80 + "\n")
-            
             logger.debug(f"FAM API Request URL: {url}")
             logger.debug(f"FAM API Request Body (bulk delete): {json.dumps(tool_ids, indent=2, default=str)}")
             
@@ -856,11 +822,9 @@ class FAMAssetCatalogClient:
             if response.status_code == 202:
                 job_data = response.json()
                 job_id = job_data.get("jobId")
-                print(f"✓ Bulk delete job submitted: {job_id}\n")
                 logger.info(f"Bulk delete job submitted for {len(tool_ids)} tools (server: {server_id}, job: {job_id})")
                 return job_id
             else:
-                print(f"✗ Unexpected status code: {response.status_code}\n")
                 logger.warning(f"Unexpected status code {response.status_code} for bulk delete")
                 return None
 

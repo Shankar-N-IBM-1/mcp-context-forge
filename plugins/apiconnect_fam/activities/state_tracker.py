@@ -77,15 +77,6 @@ class AbstractStateTracker(ABC):
         has_changed = cached_hash != current_hash
         
         # Debug: Print hash mismatch details
-        if has_changed and cached_hash is not None:
-            print(f"\n[HASH MISMATCH] Entity {entity_id}")
-            print(f"  Cached hash: {cached_hash}")
-            print(f"  Current hash: {current_hash}")
-            if entity_data:
-                import json
-                print(f"  Entity data: {json.dumps(entity_data, indent=2, default=str)}")
-            print()
-        
         return has_changed
 
     def mark_synced(self, entity_id: str, content_hash: str, metadata: Dict[str, Any] | None = None) -> None:

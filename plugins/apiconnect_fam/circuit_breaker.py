@@ -1,15 +1,47 @@
 """Location: ./plugins/apiconnect_fam/circuit_breaker.py
-Copyright 2025
+Copyright 2026
 SPDX-License-Identifier: Apache-2.0
 Authors: Shankar N
 
 Circuit Breaker Pattern for FAM API.
+
 Implements the Circuit Breaker pattern to prevent cascading failures
-when FAM API is unavailable or experiencing issues.
-States:
-- CLOSED: Normal operation, requests pass through
-- OPEN: Failures exceeded threshold, requests fail fast
-- HALF_OPEN: Testing if service recovered, limited requests allowed
+when FAM API is unavailable or experiencing issues. This pattern helps
+maintain system stability by failing fast when a service is down,
+rather than waiting for timeouts.
+
+Circuit States:
+    - CLOSED: Normal operation, all requests pass through
+    - OPEN: Failure threshold exceeded, requests fail immediately
+    - HALF_OPEN: Testing recovery, limited requests allowed
+
+State Transitions:
+    - CLOSED -> OPEN: When failure count reaches threshold
+    - OPEN -> HALF_OPEN: After recovery timeout elapses
+    - HALF_OPEN -> CLOSED: When success count reaches threshold
+    - HALF_OPEN -> OPEN: On any failure during testing
+
+Benefits:
+    - Prevents resource exhaustion from repeated failed requests
+    - Allows system to recover gracefully
+    - Provides fast failure feedback
+    - Reduces load on failing services
+
+Example:
+    ```python
+    breaker = CircuitBreaker(
+        failure_threshold=5,
+        recovery_timeout=60.0,
+        success_threshold=2
+    )
+    
+    # Use circuit breaker to protect API calls
+    result = await breaker.call(api_function, arg1, arg2)
+    ```
+
+See Also:
+    - Martin Fowler's Circuit Breaker pattern:
+      https://martinfowler.com/bliki/CircuitBreaker.html
 """
 
 # Standard
